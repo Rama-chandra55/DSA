@@ -5,6 +5,7 @@ import os
 import re
 import time
 from pathlib import Path
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -26,29 +27,88 @@ RULES = """You write concise, natural, correct LeetCode Python 3 solutions.
 
 
 def get_json(url):
-    request = Request(url, headers={"User-Agent": "DSA-Daily-Solver/1.0"})
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "DSA-Daily-Solver/1.0",
+        },
+    )
     try:
-        with urlopen(request, timeout=35) as response:
-            return json.loads(response.read().decode("utf-8"))
+        with urlopen(request, timeout=20) as response:
+            body = response.read().decode("utf-8")
     except HTTPError as error:
-        if error.code == 202:
-            return json.loads(error.read().decode("utf-8"))
-        raise RuntimeError(f"Problem API returned HTTP {error.code}") from error
+        if error.code != 202:
+            raise RuntimeError(
+                f"Problem API returned HTTP {error.code}"
+            ) from error
+        body = error.read().decode("utf-8")
     except (URLError, TimeoutError) as error:
         raise RuntimeError(f"Problem API is unavailable: {error}") from error
 
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"Problem API returned invalid JSON: {body[:300]}"
+        ) from error
 
-def daily_problem():
-    url = f"{API}/daily?domain=com"
-    for attempt in range(5):
+
+def daily_problem(target_date):
+    url = f"{API}/daily?domain=com&date={target_date}"
+    last_response = {}
+
+    for attempt in range(6):
         data = get_json(url)
-        if data.get("status") != "fetching":
-            if data.get("problems"):
-                return data.get("date", ""), data["problems"][0]
-            raise RuntimeError("The daily challenge response contains no problem")
-        if attempt < 4:
-            time.sleep(min(int(data.get("retry_after", 20)), 30))
-    raise RuntimeError("The daily challenge is still being prepared")
+        payload = data.get("data", data) if isinstance(data, dict) else {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        problems = payload.get("problems", [])
+        if isinstance(problems, list):
+            problem = next(
+                (item for item in problems if isinstance(item, dict)),
+                None,
+            )
+            if problem:
+                found_date = payload.get("date") or target_date
+                if found_date != target_date:
+                    raise RuntimeError(
+                        f"API returned {found_date} instead of {target_date}"
+                    )
+                return found_date, problem
+
+        problem = payload.get("problem")
+        if isinstance(problem, dict):
+            found_date = payload.get("date") or target_date
+            if found_date != target_date:
+                raise RuntimeError(
+                    f"API returned {found_date} instead of {target_date}"
+                )
+            return found_date, problem
+
+        last_response = data if isinstance(data, dict) else {
+            "response": str(data)
+        }
+        if attempt < 5:
+            retry_after = last_response.get(
+                "retry_after", min(15 * (2 ** attempt), 60)
+            )
+            try:
+                delay = max(5, min(int(retry_after), 60))
+            except (TypeError, ValueError):
+                delay = min(15 * (2 ** attempt), 60)
+            print(
+                f"Daily challenge for {target_date} is not ready; "
+                f"retrying in {delay} seconds."
+            )
+            time.sleep(delay)
+
+    details = json.dumps(last_response, ensure_ascii=False)[:500]
+    raise RuntimeError(
+        f"Daily challenge API returned no problem for {target_date}. "
+        f"Response: {details}"
+    )
 
 
 def problem_details(problem):
@@ -57,6 +117,7 @@ def problem_details(problem):
     source = quote(problem.get("source", "leetcode"), safe="")
     problem_id = quote(str(problem.get("id", "")), safe="")
     data = get_json(f"{API}/problems/{source}/{problem_id}")
+    data = data.get("data", data)
     data = data.get("problem", data)
     if not data.get("content"):
         raise RuntimeError(f"No statement found for {problem.get('title')}")
@@ -106,6 +167,22 @@ def existing_solution(problem):
         if (marker and marker in content) or f"problem id: {problem_id}" in content:
             return path
     return None
+
+
+def solution_file_exists(title, suffix=""):
+    expected = normalise(file_stem(title) + suffix)
+    return any(normalise(path.stem) == expected for path in python_files())
+
+
+def manually_completed_today(date):
+    state_path = Path(".github/daily-challenge-state.json")
+    if not state_path.exists():
+        return False
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return state.get("manually_completed_date") == date
 
 
 def related_problem(problem):
@@ -257,12 +334,23 @@ def set_output(name, value):
 
 
 def main():
-    date, daily = daily_problem()
+    date = datetime.now(timezone.utc).date().isoformat()
+    if manually_completed_today(date):
+        print(
+            f"Today's challenge ({date}) was already pushed manually; "
+            "skipping to prevent a duplicate."
+        )
+        set_output("changed", "false")
+        return
+
+    date, daily = daily_problem(date)
     daily = problem_details(daily)
     title = daily.get("title") or daily.get("slug") or "LeetCode Daily"
     name = file_stem(title)
     existing = existing_solution(daily)
-    alternative = bool(existing and not Path(f"{name}Alternative.py").exists())
+    alternative = bool(
+        existing and not solution_file_exists(title, "Alternative")
+    )
     target = daily
 
     if existing and not alternative:
@@ -288,7 +376,9 @@ def main():
         raise RuntimeError("Gemini could not produce a useful solution")
 
     code = review(target, validate_code(result.get("code", "")))
-    path = Path(f"{name}{'Alternative' if alternative else ''}.py")
+    path = Path("DailyChallenge") / (
+        f"{name}{'Alternative' if alternative else ''}.py"
+    )
     if path.exists():
         raise RuntimeError(f"Refusing to overwrite existing file: {path}")
 
@@ -297,6 +387,7 @@ def main():
         f"# LeetCode: https://leetcode.com/problems/{slug}/\n"
         f"# Problem ID: {target.get('id', '')}\n\n"
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(header + code.rstrip() + "\n", encoding="utf-8")
     message = (
         f"Added an alternative solution for {title}" if alternative
