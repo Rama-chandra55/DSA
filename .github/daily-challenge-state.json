@@ -1,4 +1,6 @@
 {
   "manually_completed_date": "2026-11-10",
-  "note": "The LeetCode daily challenge for this date was pushed manually before automation was enabled."
+  "note": "The LeetCode daily challenge for this date was pushed manually before automation was enabled.",
+  "daily_push_limit": "one Python solution push per Asia/Kolkata calendar day",
+  "last_pushed_ist_date": null
 }

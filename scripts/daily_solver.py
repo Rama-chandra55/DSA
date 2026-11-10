@@ -6,8 +6,9 @@ import re
 import time
 from pathlib import Path
 from datetime import datetime, timezone
+from urllib.parse import quote, urlencode
+from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 API = "https://oj-api.gdst.dev/api/v1"
@@ -174,15 +175,100 @@ def solution_file_exists(title, suffix=""):
     return any(normalise(path.stem) == expected for path in python_files())
 
 
-def manually_completed_today(date):
-    state_path = Path(".github/daily-challenge-state.json")
-    if not state_path.exists():
-        return False
+def load_state():
+    path = Path(".github/daily-challenge-state.json")
+    if not path.exists():
+        return {}
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return state.get("manually_completed_date") == date
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Daily push state file is invalid") from error
+
+
+def save_state(state):
+    path = Path(".github/daily-challenge-state.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(state, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def github_json(endpoint):
+    token = os.getenv("GITHUB_TOKEN")
+    repository = os.getenv("GITHUB_REPOSITORY")
+    if not token or not repository:
+        raise RuntimeError(
+            "GitHub Actions token and repository context are required "
+            "to enforce the daily push limit"
+        )
+
+    request = Request(
+        f"https://api.github.com/repos/{repository}/{endpoint}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "DSA-Daily-Solver/1.0",
+        },
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        details = error.read().decode(errors="replace")[:300]
+        raise RuntimeError(
+            f"GitHub API returned HTTP {error.code}: {details}"
+        ) from error
+    except (URLError, TimeoutError) as error:
+        raise RuntimeError(
+            f"Could not verify today's GitHub pushes: {error}"
+        ) from error
+
+
+def code_push_today(push_date):
+    zone = ZoneInfo("Asia/Kolkata")
+    day = datetime.strptime(push_date, "%Y-%m-%d").date()
+    start = datetime.combine(day, datetime.min.time(), tzinfo=zone)
+    since = start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    for page in range(1, 11):
+        query = urlencode({
+            "since": since,
+            "per_page": 100,
+            "page": page,
+        })
+        commits = github_json(f"commits?{query}")
+        if not isinstance(commits, list):
+            raise RuntimeError("GitHub returned an invalid commit history")
+
+        for commit in commits:
+            details = github_json(f"commits/{commit['sha']}")
+            for changed in details.get("files", []):
+                filename = changed.get("filename", "").replace("\\", "/")
+                if (
+                    filename.lower().endswith(".py")
+                    and not filename.startswith(("scripts/", ".github/"))
+                ):
+                    return filename
+
+        if len(commits) < 100:
+            break
+
+    return None
+
+
+def daily_push_already_happened(push_date):
+    state = load_state()
+    if state.get("manually_completed_date") == push_date:
+        return "today's solution was recorded as manually completed"
+    if state.get("last_pushed_ist_date") == push_date:
+        return "the automation has already pushed today's solution"
+
+    filename = code_push_today(push_date)
+    if filename:
+        return f"a Python code push already changed {filename} today"
+    return None
 
 
 def related_problem(problem):
@@ -334,16 +420,18 @@ def set_output(name, value):
 
 
 def main():
-    date = datetime.now(timezone.utc).date().isoformat()
-    if manually_completed_today(date):
+    push_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    reason = daily_push_already_happened(push_date)
+    if reason:
         print(
-            f"Today's challenge ({date}) was already pushed manually; "
-            "skipping to prevent a duplicate."
+            f"Daily push limit reached for {push_date}: {reason}. "
+            "No second solution will be generated."
         )
         set_output("changed", "false")
         return
 
-    date, daily = daily_problem(date)
+    challenge_date = datetime.now(timezone.utc).date().isoformat()
+    date, daily = daily_problem(challenge_date)
     daily = problem_details(daily)
     title = daily.get("title") or daily.get("slug") or "LeetCode Daily"
     name = file_stem(title)
@@ -376,6 +464,16 @@ def main():
         raise RuntimeError("Gemini could not produce a useful solution")
 
     code = review(target, validate_code(result.get("code", "")))
+
+    reason = daily_push_already_happened(push_date)
+    if reason:
+        print(
+            f"Another code push was detected during generation: {reason}. "
+            "Skipping this solution."
+        )
+        set_output("changed", "false")
+        return
+
     path = Path("DailyChallenge") / (
         f"{name}{'Alternative' if alternative else ''}.py"
     )
@@ -389,6 +487,13 @@ def main():
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(header + code.rstrip() + "\n", encoding="utf-8")
+
+    state = load_state()
+    state["last_pushed_ist_date"] = push_date
+    state["last_pushed_problem"] = target.get("title", title)
+    state["last_pushed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    save_state(state)
+
     message = (
         f"Added an alternative solution for {title}" if alternative
         else f"Added solution for {target.get('title', title)}"
