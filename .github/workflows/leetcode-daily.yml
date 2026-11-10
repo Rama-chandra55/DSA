@@ -1,0 +1,42 @@
+name: LeetCode Daily Solution
+
+on:
+  schedule:
+    - cron: "15 8 * * *"
+      timezone: "Asia/Kolkata"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: leetcode-daily-solver
+  cancel-in-progress: false
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Generate and review today's solution
+        id: solver
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.8-flash
+        run: python scripts/daily_solver.py
+
+      - name: Commit and push the solution
+        if: steps.solver.outputs.changed == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v7.2.1
+        with:
+          commit_message: ${{ steps.solver.outputs.commit_message }}
+          commit_user_name: github-actions[bot]
+          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
