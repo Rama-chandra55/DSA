@@ -506,13 +506,8 @@ def main():
     if path.exists():
         raise RuntimeError(f"Refusing to overwrite existing file: {path}")
 
-    slug = target.get("slug", "")
-    header = (
-        f"# LeetCode: https://leetcode.com/problems/{slug}/\n"
-        f"# Problem ID: {target.get('id', '')}\n\n"
-    )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(header + code.rstrip() + "\n", encoding="utf-8")
+    path.write_text(code.rstrip() + "\n", encoding="utf-8")
 
     state = load_state()
     state["last_pushed_ist_date"] = push_date
