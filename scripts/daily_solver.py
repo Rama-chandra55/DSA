@@ -71,18 +71,25 @@ def python_files():
 
 def existing_solution(problem):
     title = normalise(problem.get("title", ""))
-    slug = normalise(problem.get("slug", ""))
+    slug_value = problem.get("slug", "")
+    slug = normalise(slug_value)
     problem_id = normalise(str(problem.get("id", "")))
-    marker = f"leetcode.com/problems/{problem.get('slug', '')}".casefold()
+    marker = f"leetcode.com/problems/{slug_value}".casefold()
+    identifiers = {title, slug}
+    if problem_id:
+        identifiers.update({problem_id, "lc" + problem_id})
 
     for path in python_files():
-        if normalise(path.stem) in {title, slug, problem_id, "lc" + problem_id}:
+        if normalise(path.stem) in identifiers:
             return path
         try:
             content = path.read_text(encoding="utf-8").casefold()
         except (OSError, UnicodeDecodeError):
             continue
-        if (marker and marker in content) or f"problem id: {problem_id}" in content:
+        if (
+            (slug and marker in content)
+            or (problem_id and f"problem id: {problem_id}" in content)
+        ):
             return path
     return None
 
