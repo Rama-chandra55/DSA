@@ -219,6 +219,35 @@ def related_problem(problem):
     return None
 
 
+def repair_json_control_characters(value):
+    repaired = []
+    in_string = False
+    escaped = False
+
+    for char in value:
+        if in_string:
+            if escaped:
+                repaired.append(char)
+                escaped = False
+            elif char == "\\":
+                repaired.append(char)
+                escaped = True
+            elif char == '"':
+                repaired.append(char)
+                in_string = False
+            elif ord(char) < 32:
+                escapes = {"\\n": "\\\\n", "\\r": "\\\\r", "\\t": "\\\\t"}
+                repaired.append(escapes.get(char, f"\\\\u{ord(char):04x}"))
+            else:
+                repaired.append(char)
+        else:
+            repaired.append(char)
+            if char == '"':
+                in_string = True
+
+    return "".join(repaired)
+
+
 def gemini(prompt, attempts=3, timeout=180):
     if not KEY:
         raise RuntimeError("Add GEMINI_API_KEY to repository Actions secrets")
@@ -286,7 +315,22 @@ def gemini(prompt, attempts=3, timeout=180):
     try:
         return json.loads(text)
     except json.JSONDecodeError as error:
-        raise RuntimeError("Gemini did not return valid JSON") from error
+        repaired = repair_json_control_characters(text)
+        if repaired != text:
+            try:
+                result = json.loads(repaired)
+                print(
+                    "Recovered Gemini's JSON response by escaping "
+                    "unescaped line breaks inside code."
+                )
+                return result
+            except json.JSONDecodeError:
+                pass
+
+        raise RuntimeError(
+            "Gemini did not return valid JSON: "
+            f"{error.msg} at line {error.lineno}, column {error.colno}"
+        ) from error
 
 
 def make_prompt(problem, date, alternative=False, old_code=""):
