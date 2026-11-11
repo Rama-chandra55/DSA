@@ -236,8 +236,8 @@ def repair_json_control_characters(value):
                 repaired.append(char)
                 in_string = False
             elif ord(char) < 32:
-                escapes = {"\\n": "\\\\n", "\\r": "\\\\r", "\\t": "\\\\t"}
-                repaired.append(escapes.get(char, f"\\\\u{ord(char):04x}"))
+                escapes = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+                repaired.append(escapes.get(char, f"\\u{ord(char):04x}"))
             else:
                 repaired.append(char)
         else:
