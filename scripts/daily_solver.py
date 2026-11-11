@@ -3,15 +3,18 @@ import html
 import json
 import os
 import re
-import time
 from pathlib import Path
 from datetime import datetime, timezone
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
+
+from daily_challenge_search import (
+    fetch_problem_by_slug,
+    fetch_verified_daily_problem,
+)
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-API = "https://oj-api.gdst.dev/api/v1"
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 KEY = os.getenv("GEMINI_API_KEY")
 
@@ -27,99 +30,13 @@ RULES = """You write concise, natural, correct LeetCode Python 3 solutions.
 """
 
 
-def get_json(url):
-    request = Request(
-        url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "DSA-Daily-Solver/1.0",
-        },
-    )
-    try:
-        with urlopen(request, timeout=20) as response:
-            body = response.read().decode("utf-8")
-    except HTTPError as error:
-        if error.code != 202:
-            raise RuntimeError(
-                f"Problem API returned HTTP {error.code}"
-            ) from error
-        body = error.read().decode("utf-8")
-    except (URLError, TimeoutError) as error:
-        raise RuntimeError(f"Problem API is unavailable: {error}") from error
-
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(
-            f"Problem API returned invalid JSON: {body[:300]}"
-        ) from error
-
-
-def daily_problem(target_date):
-    url = f"{API}/daily?domain=com&date={target_date}"
-    last_response = {}
-
-    for attempt in range(6):
-        data = get_json(url)
-        payload = data.get("data", data) if isinstance(data, dict) else {}
-        if not isinstance(payload, dict):
-            payload = {}
-
-        problems = payload.get("problems", [])
-        if isinstance(problems, list):
-            problem = next(
-                (item for item in problems if isinstance(item, dict)),
-                None,
-            )
-            if problem:
-                found_date = payload.get("date") or target_date
-                if found_date != target_date:
-                    raise RuntimeError(
-                        f"API returned {found_date} instead of {target_date}"
-                    )
-                return found_date, problem
-
-        problem = payload.get("problem")
-        if isinstance(problem, dict):
-            found_date = payload.get("date") or target_date
-            if found_date != target_date:
-                raise RuntimeError(
-                    f"API returned {found_date} instead of {target_date}"
-                )
-            return found_date, problem
-
-        last_response = data if isinstance(data, dict) else {
-            "response": str(data)
-        }
-        if attempt < 5:
-            retry_after = last_response.get(
-                "retry_after", min(15 * (2 ** attempt), 60)
-            )
-            try:
-                delay = max(5, min(int(retry_after), 60))
-            except (TypeError, ValueError):
-                delay = min(15 * (2 ** attempt), 60)
-            print(
-                f"Daily challenge for {target_date} is not ready; "
-                f"retrying in {delay} seconds."
-            )
-            time.sleep(delay)
-
-    details = json.dumps(last_response, ensure_ascii=False)[:500]
-    raise RuntimeError(
-        f"Daily challenge API returned no problem for {target_date}. "
-        f"Response: {details}"
-    )
-
-
 def problem_details(problem):
     if problem.get("content"):
         return problem
-    source = quote(problem.get("source", "leetcode"), safe="")
-    problem_id = quote(str(problem.get("id", "")), safe="")
-    data = get_json(f"{API}/problems/{source}/{problem_id}")
-    data = data.get("data", data)
-    data = data.get("problem", data)
+    slug = problem.get("slug", "")
+    if not slug:
+        raise RuntimeError("Cannot fetch problem details without a title slug")
+    data = fetch_problem_by_slug(slug)
     if not data.get("content"):
         raise RuntimeError(f"No statement found for {problem.get('title')}")
     return data
@@ -273,16 +190,24 @@ def daily_push_already_happened(push_date):
 
 def related_problem(problem):
     for item in problem.get("similar_questions", []):
-        if item.get("source", "leetcode") != "leetcode":
+        if not isinstance(item, dict):
             continue
-        if existing_solution(item):
+        slug = item.get("titleSlug") or item.get("slug")
+        if not slug:
+            continue
+        candidate = {
+            "id": item.get("questionFrontendId") or item.get("id", ""),
+            "title": item.get("title") or item.get("translatedTitle", ""),
+            "slug": slug,
+        }
+        if existing_solution(candidate):
             continue
         try:
-            details = problem_details(item)
+            details = problem_details(candidate)
             if details.get("title") and details.get("content"):
                 return details
         except Exception as error:
-            print(f"Skipping related problem {item.get('id')}: {error}")
+            print(f"Skipping related problem {slug}: {error}")
     return None
 
 
@@ -431,7 +356,14 @@ def main():
         return
 
     challenge_date = datetime.now(timezone.utc).date().isoformat()
-    date, daily = daily_problem(challenge_date)
+    date, daily = fetch_verified_daily_problem(challenge_date)
+    if not daily:
+        print(
+            f"No verified LeetCode challenge was available for {challenge_date}. "
+            "Skipping generation to avoid solving an outdated problem."
+        )
+        set_output("changed", "false")
+        return
     daily = problem_details(daily)
     title = daily.get("title") or daily.get("slug") or "LeetCode Daily"
     name = file_stem(title)
