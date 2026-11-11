@@ -3,6 +3,7 @@ import html
 import json
 import os
 import re
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlencode
@@ -218,7 +219,7 @@ def related_problem(problem):
     return None
 
 
-def gemini(prompt):
+def gemini(prompt, attempts=3, timeout=180):
     if not KEY:
         raise RuntimeError("Add GEMINI_API_KEY to repository Actions secrets")
     url = (
@@ -238,12 +239,44 @@ def gemini(prompt):
         url, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"}, method="POST"
     )
-    try:
-        with urlopen(request, timeout=90) as response:
-            result = json.loads(response.read().decode())
-    except HTTPError as error:
-        detail = error.read().decode(errors="replace")[:400]
-        raise RuntimeError(f"Gemini API returned HTTP {error.code}: {detail}") from error
+    result = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                result = json.loads(response.read().decode())
+            break
+        except HTTPError as error:
+            detail = error.read().decode(errors="replace")[:400]
+            retryable = error.code in {408, 429, 500, 502, 503, 504}
+            if not retryable or attempt == attempts:
+                raise RuntimeError(
+                    f"Gemini API returned HTTP {error.code}: {detail}"
+                ) from error
+
+            retry_after = error.headers.get("Retry-After", "")
+            delay = int(retry_after) if retry_after.isdigit() else 15 * attempt
+            delay = min(max(delay, 5), 120)
+            print(
+                f"Gemini returned HTTP {error.code}. "
+                f"Retrying in {delay} seconds ({attempt}/{attempts - 1})."
+            )
+            time.sleep(delay)
+        except (TimeoutError, URLError, ConnectionError) as error:
+            if attempt == attempts:
+                raise RuntimeError(
+                    f"Gemini request failed after {attempts} attempts: {error}"
+                ) from error
+
+            delay = 15 * attempt
+            print(
+                f"Gemini request timed out or had a network error: {error}. "
+                f"Retrying in {delay} seconds ({attempt}/{attempts - 1})."
+            )
+            time.sleep(delay)
+
+    if result is None:
+        raise RuntimeError("Gemini did not return a response after retries")
 
     candidates = result.get("candidates", [])
     parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
