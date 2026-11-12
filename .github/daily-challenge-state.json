@@ -1,8 +1,8 @@
 {
-  "manually_completed_date": "2026-11-10",
-  "note": "The LeetCode daily challenge for this date was pushed manually before automation was enabled.",
+  "manually_completed_date": "2026-11-12",
+  "note": "The LeetCode daily challenge for this date was pushed manually after Gemini API high-demand errors.",
   "daily_push_limit": "one Python solution push per Asia/Kolkata calendar day",
-  "last_pushed_ist_date": "2026-11-11",
-  "last_pushed_problem": "Minimum Cost to Acquire Required Items",
-  "last_pushed_at_utc": "2026-11-11T04:13:07.882784+00:00"
+  "last_pushed_ist_date": "2026-11-12",
+  "last_pushed_problem": "Longest Strictly Increasing or Strictly Decreasing Subarray",
+  "last_pushed_at_utc": "2026-11-12T04:36:55+00:00"
 }
