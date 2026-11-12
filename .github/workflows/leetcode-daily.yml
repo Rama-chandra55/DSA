@@ -1,6 +1,11 @@
 name: LeetCode Daily Solution
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "daily-solver-trigger.txt"
   schedule:
     - cron: "45 2 * * *"
   workflow_dispatch:
