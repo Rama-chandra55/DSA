@@ -251,90 +251,123 @@ def repair_json_control_characters(value):
     return "".join(repaired)
 
 
-def gemini(prompt, attempts=3, timeout=180):
+def gemini(prompt, attempts=2, timeout=120):
     if not KEY:
         raise RuntimeError("Add GEMINI_API_KEY to repository Actions secrets")
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{MODEL}:generateContent?key={KEY}"
-    )
-    body = {
-        "systemInstruction": {"parts": [{"text": RULES}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "responseMimeType": "application/json",
-            "maxOutputTokens": 4096,
-        },
-    }
-    request = Request(
-        url, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST"
-    )
-    result = None
 
-    for attempt in range(1, attempts + 1):
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                result = json.loads(response.read().decode())
-            break
-        except HTTPError as error:
-            detail = error.read().decode(errors="replace")[:400]
-            retryable = error.code in {408, 429, 500, 502, 503, 504}
-            if not retryable or attempt == attempts:
-                raise RuntimeError(
-                    f"Gemini API returned HTTP {error.code}: {detail}"
-                ) from error
+    fallback = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
+    models = list(dict.fromkeys((MODEL, fallback)))
+    last_error = None
 
-            retry_after = error.headers.get("Retry-After", "")
-            delay = int(retry_after) if retry_after.isdigit() else 15 * attempt
-            delay = min(max(delay, 5), 120)
-            print(
-                f"Gemini returned HTTP {error.code}. "
-                f"Retrying in {delay} seconds ({attempt}/{attempts - 1})."
+    for model_index, model in enumerate(models):
+        for attempt in range(1, attempts + 1):
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent?key={KEY}"
             )
-            time.sleep(delay)
-        except (TimeoutError, URLError, ConnectionError) as error:
-            if attempt == attempts:
-                raise RuntimeError(
-                    f"Gemini request failed after {attempts} attempts: {error}"
-                ) from error
-
-            delay = 15 * attempt
-            print(
-                f"Gemini request timed out or had a network error: {error}. "
-                f"Retrying in {delay} seconds ({attempt}/{attempts - 1})."
+            body = {
+                "systemInstruction": {"parts": [{"text": RULES}]},
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "responseMimeType": "application/json",
+                    "maxOutputTokens": 4096,
+                },
+            }
+            request = Request(
+                url, data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"}, method="POST"
             )
-            time.sleep(delay)
 
-    if result is None:
-        raise RuntimeError("Gemini did not return a response after retries")
-
-    candidates = result.get("candidates", [])
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    text = "\n".join(part.get("text", "") for part in parts)
-    if not text:
-        raise RuntimeError("Gemini returned an empty response")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as error:
-        repaired = repair_json_control_characters(text)
-        if repaired != text:
             try:
-                result = json.loads(repaired)
-                print(
-                    "Recovered Gemini's JSON response by escaping "
-                    "unescaped line breaks inside code."
+                with urlopen(request, timeout=timeout) as response:
+                    result = json.loads(response.read().decode())
+
+                candidates = result.get("candidates", [])
+                parts = (
+                    candidates[0].get("content", {}).get("parts", [])
+                    if candidates else []
                 )
-                return result
-            except json.JSONDecodeError:
-                pass
+                response_text = "\n".join(
+                    part.get("text", "") for part in parts
+                )
+                if not response_text:
+                    raise RuntimeError("Gemini returned an empty response")
 
-        raise RuntimeError(
-            "Gemini did not return valid JSON: "
-            f"{error.msg} at line {error.lineno}, column {error.colno}"
-        ) from error
+                try:
+                    return json.loads(response_text)
+                except json.JSONDecodeError as error:
+                    repaired = repair_json_control_characters(response_text)
+                    if repaired != response_text:
+                        try:
+                            parsed = json.loads(repaired)
+                            print(
+                                "Recovered Gemini's JSON response by escaping "
+                                "unescaped line breaks inside code."
+                            )
+                            return parsed
+                        except json.JSONDecodeError:
+                            pass
 
+                    raise RuntimeError(
+                        "Gemini did not return valid JSON: "
+                        f"{error.msg} at line {error.lineno}, "
+                        f"column {error.colno}"
+                    ) from error
+
+            except HTTPError as error:
+                detail = error.read().decode(errors="replace")[:400]
+                retryable = error.code in {408, 429, 500, 502, 503, 504}
+                if not retryable:
+                    raise RuntimeError(
+                        f"Gemini API returned HTTP {error.code}: {detail}"
+                    ) from error
+
+                last_error = RuntimeError(
+                    f"Gemini API returned HTTP {error.code}: {detail}"
+                )
+                if attempt < attempts:
+                    retry_after = error.headers.get("Retry-After", "")
+                    delay = (
+                        int(retry_after) if retry_after.isdigit()
+                        else 10 * attempt
+                    )
+                    delay = min(max(delay, 5), 60)
+                    print(
+                        f"Gemini returned HTTP {error.code}. "
+                        f"Retrying in {delay} seconds."
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+
+            except (TimeoutError, URLError, ConnectionError) as error:
+                last_error = RuntimeError(
+                    f"Gemini request failed on {model}: {error}"
+                )
+                if attempt < attempts:
+                    delay = 10 * attempt
+                    print(
+                        f"Gemini model {model} timed out. "
+                        f"Retrying in {delay} seconds."
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+
+            except RuntimeError as error:
+                last_error = error
+                break
+
+        if model_index + 1 < len(models):
+            print(
+                f"Gemini model {model} did not respond reliably. "
+                f"Trying fallback model {models[model_index + 1]}."
+            )
+
+    raise RuntimeError(
+        f"Gemini request failed for all configured models: {last_error}"
+    ) from last_error
 
 def make_prompt(problem, date, alternative=False, old_code=""):
     task = "Write the best concise solution for this problem."
