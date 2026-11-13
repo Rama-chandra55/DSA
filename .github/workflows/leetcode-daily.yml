@@ -2,8 +2,10 @@ name: LeetCode Daily Solution
 
 on:
   schedule:
-    - cron: "45 2 * * *"
-    - cron: "15 3 * * *"
+    - cron: "15 8 * * *"
+      timezone: "Asia/Kolkata"
+    - cron: "45 8 * * *"
+      timezone: "Asia/Kolkata"
   workflow_dispatch:
 
 permissions:
