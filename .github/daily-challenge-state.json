@@ -2,7 +2,7 @@
   "manually_completed_date": "2026-11-12",
   "note": "The November 12 LeetCode daily challenge was pushed manually after Gemini API timeouts.",
   "daily_push_limit": "one Python solution push per Asia/Kolkata calendar day",
-  "last_pushed_ist_date": "2026-11-13",
-  "last_pushed_problem": "Count Non-Decreasing Subarrays After K Operations",
-  "last_pushed_at_utc": "2026-11-13T14:59:52+00:00"
+  "last_pushed_ist_date": "2026-11-14",
+  "last_pushed_problem": "Minimum Positive Sum Subarray ",
+  "last_pushed_at_utc": "2026-11-14T10:25:19.017017+00:00"
 }
