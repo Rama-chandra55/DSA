@@ -404,6 +404,7 @@ def gemini(prompt, attempts=3, timeout=120, max_total_seconds=600):
         f"Gemini request failed for all configured models: {last_error}"
     ) from last_error
 
+
 def make_prompt(problem, date, alternative=False, old_code=""):
     task = "Write the best concise solution for this problem."
     if alternative:
