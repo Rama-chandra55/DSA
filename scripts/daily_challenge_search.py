@@ -38,8 +38,8 @@ def parse_retry_after(headers, detail=""):
                 pass
 
     match = re.search(
-        r"(?:try again|retry)\\s+(?:in|after)\\s+"
-        r"(\\d+)\\s*(seconds?|minutes?|hours?)",
+        r"(?:try again|retry)\s+(?:in|after)\s+"
+        r"(\d+)\s*(seconds?|minutes?|hours?)",
         detail,
         re.IGNORECASE,
     )
