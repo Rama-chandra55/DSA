@@ -1,11 +1,6 @@
 name: LeetCode Daily Solution
 
 on:
-  schedule:
-    - cron: "15 8 * * *"
-      timezone: "Asia/Kolkata"
-    - cron: "45 8 * * *"
-      timezone: "Asia/Kolkata"
   workflow_dispatch:
 
 permissions:
@@ -27,6 +22,9 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+
+      - name: Test daily challenge source handling
+        run: python -m unittest discover -s scripts -p "test_daily_challenge_search.py"
 
       - name: Generate and review today's solution
         id: solver
