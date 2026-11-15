@@ -1,6 +1,8 @@
 import json
 import re
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -9,6 +11,48 @@ from urllib.request import Request, urlopen
 
 ALFA_API = "https://alfa-leetcode-api.onrender.com"
 POTD_ARCHIVE = "https://leetcodethehardway.com/potd/"
+
+
+class SourceHTTPError(RuntimeError):
+    def __init__(self, status_code, detail, retry_after_seconds=None):
+        super().__init__(f"Source returned HTTP {status_code}: {detail}")
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
+
+
+def parse_retry_after(headers, detail=""):
+    value = headers.get("Retry-After") if headers else None
+    if value:
+        try:
+            return max(0, int(value.strip()))
+        except (AttributeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(
+                    0,
+                    int((retry_at - datetime.now(timezone.utc)).total_seconds()),
+                )
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+    match = re.search(
+        r"(?:try again|retry)\\s+(?:in|after)\\s+"
+        r"(\\d+)\\s*(seconds?|minutes?|hours?)",
+        detail,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    delay = int(match.group(1))
+    unit = match.group(2).lower()
+    if unit.startswith("hour"):
+        delay *= 3600
+    elif unit.startswith("minute"):
+        delay *= 60
+    return delay
 
 
 class DailyArchiveParser(HTMLParser):
@@ -50,8 +94,10 @@ def fetch_text(url, timeout=35):
             return response.read().decode("utf-8")
     except HTTPError as error:
         detail = error.read().decode(errors="replace")[:250]
-        raise RuntimeError(
-            f"Source returned HTTP {error.code}: {detail}"
+        raise SourceHTTPError(
+            error.code,
+            detail,
+            parse_retry_after(error.headers, detail),
         ) from error
     except (URLError, TimeoutError) as error:
         raise RuntimeError(f"Source is unavailable: {error}") from error
@@ -138,8 +184,18 @@ def fetch_problem_by_slug(slug):
     return problem
 
 
-def fetch_verified_daily_problem(target_date, attempts=5, retry_seconds=60):
+def fetch_verified_daily_problem(
+    target_date,
+    attempts=5,
+    retry_seconds=30,
+    max_retry_delay=120,
+    max_rate_limit_retries=1,
+):
     last_reason = "The sources have not published today's challenge yet"
+    attempts = max(1, int(attempts))
+    retry_seconds = max(1, int(retry_seconds))
+    max_retry_delay = max(1, int(max_retry_delay))
+    rate_limit_retries = 0
 
     for attempt in range(1, attempts + 1):
         try:
@@ -172,6 +228,47 @@ def fetch_verified_daily_problem(target_date, attempts=5, retry_seconds=60):
                 )
                 return target_date, problem
 
+        except SourceHTTPError as error:
+            last_reason = str(error)
+
+            if error.status_code == 429:
+                delay = error.retry_after_seconds
+                if delay is None:
+                    delay = min(
+                        retry_seconds * (2 ** rate_limit_retries),
+                        max_retry_delay,
+                    )
+
+                if delay > max_retry_delay:
+                    print(
+                        "Source rate-limited this runner (HTTP 429) and "
+                        f"requested a {delay}-second cooldown. Stopping this "
+                        "run without making more requests; the next scheduled "
+                        "run will retry."
+                    )
+                    return None, None
+
+                if rate_limit_retries >= max_rate_limit_retries:
+                    print(
+                        "Source is still rate-limiting this runner after "
+                        "the allowed retry. Stopping without more requests."
+                    )
+                    return None, None
+
+                rate_limit_retries += 1
+                print(
+                    f"Source returned HTTP 429. Respecting its "
+                    f"{delay}-second cooldown before one retry "
+                    f"({rate_limit_retries}/{max_rate_limit_retries})."
+                )
+                if delay:
+                    time.sleep(delay)
+                continue
+
+            if error.status_code not in {408, 500, 502, 503, 504}:
+                print(f"Daily challenge verification stopped: {last_reason}")
+                return None, None
+
         except Exception as error:
             last_reason = str(error)
 
@@ -180,7 +277,12 @@ def fetch_verified_daily_problem(target_date, attempts=5, retry_seconds=60):
             f"{target_date} was not successful: {last_reason}"
         )
         if attempt < attempts:
-            time.sleep(retry_seconds)
+            delay = min(
+                retry_seconds * (2 ** (attempt - 1)),
+                max_retry_delay,
+            )
+            print(f"Retrying verification in {delay} seconds.")
+            time.sleep(delay)
 
     print(f"Daily challenge was not verified: {last_reason}")
     return None, None
