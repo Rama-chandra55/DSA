@@ -311,7 +311,7 @@ def gemini(prompt, attempts=3, timeout=120, max_total_seconds=600):
                     candidates[0].get("content", {}).get("parts", [])
                     if candidates else []
                 )
-                response_text = "\\n".join(
+                response_text = "\n".join(
                     part.get("text", "") for part in parts
                 )
                 if not response_text:
