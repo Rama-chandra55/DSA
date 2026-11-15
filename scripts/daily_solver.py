@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_RUN_DEADLINE = None
 
 RULES = """You write concise, natural, correct LeetCode Python 3 solutions.
 - Return a LeetCode-ready class Solution with the required method signature.
@@ -271,6 +272,9 @@ def gemini(prompt, attempts=3, timeout=120, max_total_seconds=600):
     timeout = max(1, int(timeout))
     max_total_seconds = max(1, int(max_total_seconds))
     deadline = time.monotonic() + max_total_seconds
+    if GEMINI_RUN_DEADLINE is not None:
+        deadline = min(deadline, GEMINI_RUN_DEADLINE)
+    budget_seconds = max(1, int(deadline - time.monotonic()))
     last_error = None
 
     for model_index, model in enumerate(models):
@@ -393,7 +397,7 @@ def gemini(prompt, attempts=3, timeout=120, max_total_seconds=600):
     if time.monotonic() >= deadline:
         raise RuntimeError(
             "Gemini request time budget was exhausted "
-            f"after {max_total_seconds} seconds. Last error: {last_error}"
+            f"after {budget_seconds} seconds. Last error: {last_error}"
         ) from last_error
 
     raise RuntimeError(
@@ -503,6 +507,7 @@ def set_output(name, value):
 
 
 def main():
+    global GEMINI_RUN_DEADLINE
     push_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
     reason = daily_push_already_happened(push_date)
     if reason:
@@ -513,6 +518,7 @@ def main():
         set_output("changed", "false")
         return
 
+    GEMINI_RUN_DEADLINE = time.monotonic() + 20 * 60
     challenge_date = datetime.now(timezone.utc).date().isoformat()
     date, daily = fetch_verified_daily_problem(challenge_date)
     if not daily:
