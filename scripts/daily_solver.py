@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from daily_challenge_search import (
+    SourceHTTPError,
     fetch_problem_by_slug,
     fetch_verified_daily_problem,
 )
@@ -529,7 +530,19 @@ def main():
         )
         set_output("changed", "false")
         return
-    daily = problem_details(daily)
+    try:
+        daily = problem_details(daily)
+    except SourceHTTPError as error:
+        if error.status_code != 429:
+            raise
+        print(
+            "LeetCode rate-limited the runner while loading today's problem "
+            f"statement: {error}. Skipping generation; the next scheduled "
+            "run will try again."
+        )
+        set_output("changed", "false")
+        return
+
     title = daily.get("title") or daily.get("slug") or "LeetCode Daily"
     name = file_stem(title)
     existing = existing_solution(daily)
