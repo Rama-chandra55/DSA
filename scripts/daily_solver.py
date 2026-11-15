@@ -251,16 +251,38 @@ def repair_json_control_characters(value):
     return "".join(repaired)
 
 
-def gemini(prompt, attempts=2, timeout=120):
+def gemini(prompt, attempts=3, timeout=120, max_total_seconds=600):
     if not KEY:
         raise RuntimeError("Add GEMINI_API_KEY to repository Actions secrets")
 
     fallback = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
-    models = list(dict.fromkeys((MODEL, fallback)))
+    secondary_fallback = os.getenv(
+        "GEMINI_SECONDARY_FALLBACK_MODEL", "gemini-3.5-flash-lite"
+    )
+    models = list(dict.fromkeys(
+        model.strip()
+        for model in (MODEL, fallback, secondary_fallback)
+        if model and model.strip()
+    ))
+    if not models:
+        raise RuntimeError("No Gemini models are configured")
+
+    attempts = max(1, int(attempts))
+    timeout = max(1, int(timeout))
+    max_total_seconds = max(1, int(max_total_seconds))
+    deadline = time.monotonic() + max_total_seconds
     last_error = None
 
     for model_index, model in enumerate(models):
+        if time.monotonic() >= deadline:
+            break
+
         for attempt in range(1, attempts + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            request_timeout = min(timeout, max(1, int(remaining)))
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model}:generateContent?key={KEY}"
@@ -269,7 +291,6 @@ def gemini(prompt, attempts=2, timeout=120):
                 "systemInstruction": {"parts": [{"text": RULES}]},
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "temperature": 0.2,
                     "responseMimeType": "application/json",
                     "maxOutputTokens": 4096,
                 },
@@ -279,8 +300,10 @@ def gemini(prompt, attempts=2, timeout=120):
                 headers={"Content-Type": "application/json"}, method="POST"
             )
 
+            print(f"Calling Gemini model {model} (attempt {attempt}/{attempts}).")
+
             try:
-                with urlopen(request, timeout=timeout) as response:
+                with urlopen(request, timeout=request_timeout) as response:
                     result = json.loads(response.read().decode())
 
                 candidates = result.get("candidates", [])
@@ -288,7 +311,7 @@ def gemini(prompt, attempts=2, timeout=120):
                     candidates[0].get("content", {}).get("parts", [])
                     if candidates else []
                 )
-                response_text = "\n".join(
+                response_text = "\\n".join(
                     part.get("text", "") for part in parts
                 )
                 if not response_text:
@@ -318,27 +341,27 @@ def gemini(prompt, attempts=2, timeout=120):
             except HTTPError as error:
                 detail = error.read().decode(errors="replace")[:400]
                 retryable = error.code in {408, 429, 500, 502, 503, 504}
-                if not retryable:
-                    raise RuntimeError(
-                        f"Gemini API returned HTTP {error.code}: {detail}"
-                    ) from error
-
                 last_error = RuntimeError(
                     f"Gemini API returned HTTP {error.code}: {detail}"
                 )
+                if not retryable:
+                    break
+
                 if attempt < attempts:
                     retry_after = error.headers.get("Retry-After", "")
                     delay = (
                         int(retry_after) if retry_after.isdigit()
-                        else 10 * attempt
+                        else min(10 * (2 ** (attempt - 1)), 40)
                     )
                     delay = min(max(delay, 5), 60)
-                    print(
-                        f"Gemini returned HTTP {error.code}. "
-                        f"Retrying in {delay} seconds."
-                    )
-                    time.sleep(delay)
-                    continue
+                    remaining = deadline - time.monotonic()
+                    if delay < remaining:
+                        print(
+                            f"Gemini returned HTTP {error.code}. "
+                            f"Retrying {model} in {delay} seconds."
+                        )
+                        time.sleep(delay)
+                        continue
                 break
 
             except (TimeoutError, URLError, ConnectionError) as error:
@@ -346,24 +369,32 @@ def gemini(prompt, attempts=2, timeout=120):
                     f"Gemini request failed on {model}: {error}"
                 )
                 if attempt < attempts:
-                    delay = 10 * attempt
-                    print(
-                        f"Gemini model {model} timed out. "
-                        f"Retrying in {delay} seconds."
-                    )
-                    time.sleep(delay)
-                    continue
+                    delay = min(10 * (2 ** (attempt - 1)), 40)
+                    remaining = deadline - time.monotonic()
+                    if delay < remaining:
+                        print(
+                            f"Gemini model {model} timed out or had a "
+                            f"connection error. Retrying in {delay} seconds."
+                        )
+                        time.sleep(delay)
+                        continue
                 break
 
-            except RuntimeError as error:
+            except (RuntimeError, json.JSONDecodeError) as error:
                 last_error = error
                 break
 
-        if model_index + 1 < len(models):
+        if model_index + 1 < len(models) and time.monotonic() < deadline:
             print(
                 f"Gemini model {model} did not respond reliably. "
                 f"Trying fallback model {models[model_index + 1]}."
             )
+
+    if time.monotonic() >= deadline:
+        raise RuntimeError(
+            "Gemini request time budget was exhausted "
+            f"after {max_total_seconds} seconds. Last error: {last_error}"
+        ) from last_error
 
     raise RuntimeError(
         f"Gemini request failed for all configured models: {last_error}"
