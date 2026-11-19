@@ -413,6 +413,14 @@ def fetch_verified_daily_problem(target_date):
         )
         return target_date, oj_problem
 
+    if not oj_problem and not archived:
+        print(
+            "Neither primary source returned a verifiable daily challenge. "
+            "Skipping the Alfa request because one source alone cannot "
+            "confirm the problem."
+        )
+        return None, None
+
     try:
         alfa_problem = fetch_alfa_daily_problem(target_date)
         if alfa_problem:
