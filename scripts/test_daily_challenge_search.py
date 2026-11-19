@@ -121,11 +121,15 @@ class DailySourceVerificationTests(unittest.TestCase):
         self.assertIsNone(date)
         self.assertIsNone(result)
 
-    def test_single_source_is_not_enough_to_generate(self):
+    def test_missing_primary_sources_skip_unverified_alfa_request(self):
         with (
             patch.object(sources, "fetch_oj_daily_problem", return_value=None),
             patch.object(sources, "archive_problem", return_value=None),
-            patch.object(sources, "fetch_alfa_daily_problem", return_value=problem()),
+            patch.object(
+                sources,
+                "fetch_alfa_daily_problem",
+                side_effect=AssertionError("one source alone cannot verify the challenge"),
+            ),
         ):
             date, result = sources.fetch_verified_daily_problem("2026-11-19")
 
