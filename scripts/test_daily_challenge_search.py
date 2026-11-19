@@ -1,94 +1,203 @@
 import io
+import tempfile
 import unittest
-from unittest.mock import patch
+from pathlib import Path
 from urllib.error import HTTPError
+from unittest.mock import patch
 
-import daily_challenge_search as daily
+import daily_challenge_search as sources
 
 
-class RetryAfterTests(unittest.TestCase):
+def problem(problem_id="1", title="Two Sum"):
+    return {
+        "id": problem_id,
+        "title": title,
+        "slug": "two-sum",
+        "content": "<p>Find two numbers.</p>",
+        "is_paid_only": False,
+    }
+
+
+class RetryAfterParsingTests(unittest.TestCase):
     def test_parses_retry_after_seconds_header(self):
         self.assertEqual(
             3600,
-            daily.parse_retry_after({"Retry-After": "3600"}, ""),
+            sources.parse_retry_after({"Retry-After": "3600"}, ""),
         )
 
     def test_parses_retry_after_hint_from_response_body(self):
         self.assertEqual(
             3600,
-            daily.parse_retry_after(
+            sources.parse_retry_after(
                 {},
                 "Too many requests from this IP, try again in 1 hour",
             ),
         )
 
-    def test_fetch_text_preserves_rate_limit_metadata(self):
-        response_error = HTTPError(
-            "https://example.com/daily",
-            429,
-            "Too Many Requests",
-            {"Retry-After": "3600"},
-            io.BytesIO(b"Too many requests"),
-        )
-        with patch.object(daily, "urlopen", side_effect=response_error):
-            with self.assertRaises(daily.SourceHTTPError) as raised:
-                daily.fetch_text("https://example.com/daily")
 
-        self.assertEqual(429, raised.exception.status_code)
-        self.assertEqual(3600, raised.exception.retry_after_seconds)
+class DailySourceVerificationTests(unittest.TestCase):
+    def setUp(self):
+        sources._HTTP_CACHE.clear()
+        sources._SOURCE_COOLDOWNS.clear()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        sources.COOLDOWN_FILE = Path(self.temp_dir.name) / "cooldowns.json"
 
-    def test_long_rate_limit_stops_without_repeating_requests(self):
-        rate_limit = daily.SourceHTTPError(
-            429,
-            "Too many requests, try again in 1 hour",
-            3600,
-        )
+    def test_oj_and_archive_verify_without_calling_third_source(self):
         with (
-            patch.object(daily, "fetch_json", side_effect=rate_limit) as fetch,
-            patch.object(daily.time, "sleep") as sleep,
+            patch.object(sources, "fetch_oj_daily_problem", return_value=problem()),
+            patch.object(
+                sources,
+                "archive_problem",
+                return_value={"id": "1", "title": "Two Sum"},
+            ),
+            patch.object(
+                sources,
+                "fetch_alfa_daily_problem",
+                side_effect=AssertionError("third source should not be called"),
+            ),
         ):
-            result = daily.fetch_verified_daily_problem("2026-11-15")
+            date, result = sources.fetch_verified_daily_problem("2026-11-19")
 
-        self.assertEqual((None, None), result)
-        self.assertEqual(1, fetch.call_count)
-        sleep.assert_not_called()
+        self.assertEqual("2026-11-19", date)
+        self.assertEqual("1", result["id"])
 
-    def test_short_rate_limit_waits_and_retries_once(self):
-        target_date = "2026-11-15"
-        problem_data = {
-            "date": target_date,
-            "questionFrontendId": "1524",
-            "title": "Number of Sub-arrays With Odd Sum",
-            "titleSlug": "number-of-sub-arrays-with-odd-sum",
-            "question": "Given an array, return the required count.",
-            "difficulty": "Medium",
-            "topicTags": [],
-        }
-        archive_data = {
-            "id": "1524",
-            "title": "Number of Sub-arrays With Odd Sum",
-        }
-        rate_limit = daily.SourceHTTPError(
-            429,
-            "Temporary rate limit",
-            30,
-        )
-
+    def test_oj_rate_limit_falls_back_to_archive_and_alfa(self):
         with (
             patch.object(
-                daily,
-                "fetch_json",
-                side_effect=[rate_limit, problem_data],
-            ) as fetch,
-            patch.object(daily, "archive_problem", return_value=archive_data),
-            patch.object(daily.time, "sleep") as sleep,
+                sources,
+                "fetch_oj_daily_problem",
+                side_effect=sources.SourceHTTPError(429, "slow down", 1200),
+            ),
+            patch.object(
+                sources,
+                "archive_problem",
+                return_value={"id": "1", "title": "Two Sum"},
+            ),
+            patch.object(sources, "fetch_alfa_daily_problem", return_value=problem()),
+            patch.object(sources.time, "sleep") as sleep,
         ):
-            result = daily.fetch_verified_daily_problem(target_date)
+            date, result = sources.fetch_verified_daily_problem("2026-11-19")
+            sleep.assert_not_called()
 
-        self.assertEqual(target_date, result[0])
-        self.assertEqual("1524", result[1]["id"])
-        self.assertEqual(2, fetch.call_count)
-        sleep.assert_called_once_with(30)
+        self.assertEqual("2026-11-19", date)
+        self.assertEqual("1", result["id"])
+
+    def test_alfa_is_not_needed_when_oj_and_archive_match(self):
+        with (
+            patch.object(sources, "fetch_oj_daily_problem", return_value=problem()),
+            patch.object(
+                sources,
+                "archive_problem",
+                return_value={"id": "1", "title": "Two Sum"},
+            ),
+            patch.object(
+                sources,
+                "fetch_alfa_daily_problem",
+                side_effect=AssertionError("third source should not be called"),
+            ),
+        ):
+            date, result = sources.fetch_verified_daily_problem("2026-11-19")
+
+        self.assertEqual("2026-11-19", date)
+        self.assertEqual("1", result["id"])
+
+    def test_disagreement_is_rejected_when_no_majority_exists(self):
+        with (
+            patch.object(sources, "fetch_oj_daily_problem", return_value=problem()),
+            patch.object(
+                sources,
+                "archive_problem",
+                return_value={"id": "2", "title": "Add Two Numbers"},
+            ),
+            patch.object(
+                sources,
+                "fetch_alfa_daily_problem",
+                return_value=problem("3", "Longest Substring"),
+            ),
+        ):
+            date, result = sources.fetch_verified_daily_problem("2026-11-19")
+
+        self.assertIsNone(date)
+        self.assertIsNone(result)
+
+    def test_single_source_is_not_enough_to_generate(self):
+        with (
+            patch.object(sources, "fetch_oj_daily_problem", return_value=None),
+            patch.object(sources, "archive_problem", return_value=None),
+            patch.object(sources, "fetch_alfa_daily_problem", return_value=problem()),
+        ):
+            date, result = sources.fetch_verified_daily_problem("2026-11-19")
+
+        self.assertIsNone(date)
+        self.assertIsNone(result)
+
+    def test_oj_fetching_response_is_not_polled(self):
+        with patch.object(
+            sources,
+            "fetch_json",
+            return_value={"status": "fetching", "retry_after": 30},
+        ) as fetch:
+            result = sources.fetch_oj_daily_problem("2026-11-19")
+
+        self.assertIsNone(result)
+        self.assertEqual(1, fetch.call_count)
+
+    def test_429_retry_after_persists_across_fresh_runner(self):
+        error = HTTPError(
+            "https://example.test/daily",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "1229"},
+            io.BytesIO(b"rate limited"),
+        )
+        with patch.object(sources, "urlopen", side_effect=error) as mocked:
+            with self.assertRaises(sources.SourceHTTPError):
+                sources.fetch_text("https://example.test/daily")
+            sources._SOURCE_COOLDOWNS.clear()
+            with self.assertRaises(sources.SourceHTTPError) as raised:
+                sources.fetch_text("https://example.test/another")
+
+        self.assertEqual(1, mocked.call_count)
+        self.assertEqual(429, raised.exception.status_code)
+        self.assertGreater(raised.exception.retry_after_seconds, 0)
+        self.assertTrue(sources.COOLDOWN_FILE.exists())
+        self.assertIn("example.test", sources.load_source_cooldowns())
+
+    def test_successful_get_is_cached_briefly(self):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"ok": true}'
+        with patch.object(sources, "urlopen", return_value=response) as mocked:
+            first = sources.fetch_text("https://example.test/data")
+            second = sources.fetch_text("https://example.test/data")
+
+        self.assertEqual('{"ok": true}', first)
+        self.assertEqual(first, second)
+        self.assertEqual(1, mocked.call_count)
+
+    def test_oj_problem_normalizes_paid_only_and_content_fields(self):
+        payload = {
+            "date": "2026-11-19",
+            "source": "leetcode.com",
+            "problems": [
+                {
+                    "id": "1",
+                    "source": "leetcode",
+                    "slug": "two-sum",
+                    "title": "Two Sum",
+                    "content": "<p>Statement</p>",
+                    "paid_only": 0,
+                    "tags": ["Array"],
+                }
+            ],
+        }
+        with patch.object(sources, "fetch_json", return_value=payload):
+            result = sources.fetch_oj_daily_problem("2026-11-19")
+
+        self.assertEqual("1", result["id"])
+        self.assertEqual("<p>Statement</p>", result["content"])
+        self.assertFalse(result["is_paid_only"])
 
 
 if __name__ == "__main__":
