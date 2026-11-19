@@ -26,6 +26,14 @@ jobs:
       - name: Run Python unit tests
         run: python -m unittest discover -s scripts -p "test_*.py"
 
+      - name: Restore source cooldown state
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/leetcode-source-cooldowns.json
+          key: leetcode-source-cooldowns-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            leetcode-source-cooldowns-
+
       - name: Generate and review today's solution
         id: solver
         env:
@@ -34,6 +42,7 @@ jobs:
           GEMINI_FALLBACK_MODEL: gemini-3.7-flash
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_COOLDOWN_FILE: ${{ runner.temp }}/leetcode-source-cooldowns.json
         run: python scripts/daily_solver.py
 
       - name: Commit and push the solution
@@ -43,3 +52,10 @@ jobs:
           commit_message: ${{ steps.solver.outputs.commit_message }}
           commit_user_name: github-actions[bot]
           commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+
+      - name: Save source cooldown state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/leetcode-source-cooldowns.json
+          key: leetcode-source-cooldowns-${{ github.run_id }}-${{ github.run_attempt }}
