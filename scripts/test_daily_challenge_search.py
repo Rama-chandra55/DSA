@@ -180,6 +180,47 @@ class DailySourceVerificationTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(1, mocked.call_count)
 
+    def test_oj_accepts_missing_top_level_source_when_record_identifies_leetcode(self):
+        payload = {
+            "date": "2026-11-21",
+            "source": None,
+            "problems": [
+                {
+                    "id": "3331",
+                    "source": "leetcode",
+                    "slug": "find-subtree-sizes-after-changes",
+                    "title": "Find Subtree Sizes After Changes",
+                    "content": "<p>Given a tree...</p>",
+                    "paid_only": 0,
+                    "tags": ["Tree"],
+                }
+            ],
+        }
+        with patch.object(sources, "fetch_json", return_value=payload):
+            result = sources.fetch_oj_daily_problem("2026-11-21")
+
+        self.assertEqual("3331", result["id"])
+        self.assertEqual("Find Subtree Sizes After Changes", result["title"])
+
+    def test_oj_rejects_missing_top_level_source_without_leetcode_record(self):
+        payload = {
+            "date": "2026-11-21",
+            "source": None,
+            "problems": [
+                {
+                    "id": "abc123",
+                    "source": "atcoder",
+                    "slug": "sample",
+                    "title": "Sample",
+                    "content": "<p>Statement</p>",
+                }
+            ],
+        }
+        with patch.object(sources, "fetch_json", return_value=payload):
+            result = sources.fetch_oj_daily_problem("2026-11-21")
+
+        self.assertIsNone(result)
+
     def test_oj_problem_normalizes_paid_only_and_content_fields(self):
         payload = {
             "date": "2026-11-19",
