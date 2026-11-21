@@ -304,15 +304,35 @@ def fetch_oj_daily_problem(target_date):
         )
         return None
 
-    daily_source = payload.get("source")
-    if daily_source not in {"leetcode.com", "leetcode"}:
-        print(f"OJ API returned an unexpected source: {daily_source}.")
-        return None
-
     records = payload.get("problems")
     if not isinstance(records, list):
         print("OJ API daily response did not contain a problems list.")
         return None
+
+    daily_source = payload.get("source")
+    if daily_source not in {"leetcode.com", "leetcode"}:
+        if daily_source is not None:
+            print(f"OJ API returned an unexpected source: {daily_source}.")
+            return None
+
+        # Some API responses omit the top-level source. Accept that response
+        # only when the actual daily problem record explicitly identifies
+        # itself as a LeetCode problem.
+        has_leetcode_record = any(
+            isinstance(item, dict)
+            and item.get("source") in {"leetcode", "leetcode.com"}
+            for item in records
+        )
+        if not has_leetcode_record:
+            print(
+                "OJ API omitted its top-level source and no problem record "
+                "explicitly identified LeetCode."
+            )
+            return None
+        print(
+            "OJ API omitted its top-level source; checking the explicit "
+            "source on the daily problem record."
+        )
 
     record = next(
         (
