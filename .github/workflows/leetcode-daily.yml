@@ -40,7 +40,7 @@ jobs:
         run: |
           mkdir -p "$(dirname "$SOURCE_COOLDOWN_FILE")"
           if [ ! -f "$SOURCE_COOLDOWN_FILE" ]; then
-            printf '{}\\n' > "$SOURCE_COOLDOWN_FILE"
+            echo '{}' > "$SOURCE_COOLDOWN_FILE"
           fi
 
       - name: Generate and review today's solution
