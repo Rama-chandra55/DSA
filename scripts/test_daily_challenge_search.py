@@ -1,4 +1,5 @@
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,30 +39,45 @@ class RetryAfterParsingTests(unittest.TestCase):
 
 class LeetCodeGraphQLTests(unittest.TestCase):
     def test_official_graphql_response_is_normalized_and_date_checked(self):
-        payload = {
+        daily_payload = {
             "data": {
                 "activeDailyCodingChallengeQuestion": {
                     "date": "2026-11-22",
                     "link": "/problems/check-if-all-as-appears-before-all-bs/",
                     "question": {
-                        "questionId": "2124",
                         "questionFrontendId": "2124",
                         "title": "Check if All A's Appears Before All B's",
                         "titleSlug": "check-if-all-as-appears-before-all-bs",
                         "difficulty": "Easy",
-                        "content": "<p>Check the order of the characters.</p>",
-                        "topicTags": [{"name": "String", "slug": "string"}],
-                        "similarQuestions": "[]",
                         "isPaidOnly": False,
+                        "topicTags": [{"name": "String", "slug": "string"}],
                     },
                 }
             }
         }
-        response = MagicMock()
-        response.__enter__.return_value = response
-        response.read.return_value = __import__("json").dumps(payload).encode("utf-8")
+        details_payload = {
+            "data": {
+                "question": {
+                    "questionId": "2124",
+                    "questionFrontendId": "2124",
+                    "title": "Check if All A's Appears Before All B's",
+                    "titleSlug": "check-if-all-as-appears-before-all-bs",
+                    "difficulty": "Easy",
+                    "content": "<p>Check the order of the characters.</p>",
+                    "topicTags": [{"name": "String", "slug": "string"}],
+                    "similarQuestions": "[]",
+                    "isPaidOnly": False,
+                }
+            }
+        }
+        responses = []
+        for payload in (daily_payload, details_payload):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps(payload).encode("utf-8")
+            responses.append(response)
 
-        with patch.object(sources, "urlopen", return_value=response) as mocked:
+        with patch.object(sources, "urlopen", side_effect=responses) as mocked:
             result = sources.fetch_leetcode_graphql_daily_problem("2026-11-22")
 
         self.assertEqual("2124", result["id"])
@@ -71,14 +87,22 @@ class LeetCodeGraphQLTests(unittest.TestCase):
         )
         self.assertEqual("check-if-all-as-appears-before-all-bs", result["slug"])
         self.assertEqual(["String"], result["tags"])
-        request = mocked.call_args.args[0]
-        self.assertEqual("https://leetcode.com/graphql", request.full_url)
-        request_body = __import__("json").loads(request.data.decode("utf-8"))
-        self.assertEqual("questionOfToday", request_body["operationName"])
-        self.assertIn(
-            "activeDailyCodingChallengeQuestion",
-            request_body["query"],
+        self.assertEqual(2, mocked.call_count)
+
+        daily_request = mocked.call_args_list[0].args[0]
+        self.assertEqual("https://leetcode.com/graphql", daily_request.full_url)
+        daily_body = json.loads(daily_request.data.decode("utf-8"))
+        self.assertEqual("questionOfToday", daily_body["operationName"])
+        self.assertIn("activeDailyCodingChallengeQuestion", daily_body["query"])
+
+        details_request = mocked.call_args_list[1].args[0]
+        details_body = json.loads(details_request.data.decode("utf-8"))
+        self.assertEqual("questionData", details_body["operationName"])
+        self.assertEqual(
+            {"titleSlug": "check-if-all-as-appears-before-all-bs"},
+            details_body["variables"],
         )
+        self.assertIn("content", details_body["query"])
 
     def test_official_graphql_rejects_a_different_date(self):
         payload = {
@@ -97,7 +121,7 @@ class LeetCodeGraphQLTests(unittest.TestCase):
         }
         response = MagicMock()
         response.__enter__.return_value = response
-        response.read.return_value = __import__("json").dumps(payload).encode("utf-8")
+        response.read.return_value = json.dumps(payload).encode("utf-8")
 
         with patch.object(sources, "urlopen", return_value=response):
             result = sources.fetch_leetcode_graphql_daily_problem("2026-11-22")
