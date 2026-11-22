@@ -54,6 +54,15 @@ jobs:
           SOURCE_COOLDOWN_FILE: ${{ runner.temp }}/leetcode-source-cooldowns.json
         run: python scripts/daily_solver.py
 
+      - name: Explain when no solution was pushed
+        if: steps.solver.outputs.changed != 'true'
+        run: |
+          {
+            echo "### No new solution was pushed"
+            echo
+            echo "The solver did not create a new file. This may mean the daily challenge could not be verified, a solution already exists, or today's push limit was already reached. Check the solver logs for the exact reason."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Commit and push the solution
         if: steps.solver.outputs.changed == 'true'
         uses: stefanzweifel/git-auto-commit-action@v7.2.1
