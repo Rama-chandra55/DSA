@@ -197,6 +197,110 @@ def fetch_json(url, cache_seconds=90):
         raise RuntimeError("Source returned invalid JSON") from error
 
 
+def fetch_leetcode_graphql_daily_problem(target_date):
+    """Fetch the daily challenge directly from LeetCode's official GraphQL API."""
+    query = """
+    query questionOfToday {
+      activeDailyCodingChallengeQuestion {
+        date
+        link
+        question {
+          questionId
+          questionFrontendId
+          title
+          titleSlug
+          difficulty
+          content
+          topicTags {
+            name
+            slug
+          }
+          similarQuestions
+          isPaidOnly
+        }
+      }
+    }
+    """
+    request = Request(
+        "https://leetcode.com/graphql",
+        data=json.dumps({
+            "query": query,
+            "operationName": "questionOfToday",
+        }).encode("utf-8"),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": "https://leetcode.com",
+            "Referer": "https://leetcode.com/",
+            "User-Agent": "Mozilla/5.0 (compatible; DSA-Daily-Challenge/1.0)",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=25) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        detail = error.read().decode(errors="replace")[:300]
+        raise SourceHTTPError(
+            error.code,
+            detail,
+            parse_retry_after(error.headers, detail),
+        ) from error
+    except json.JSONDecodeError as error:
+        raise RuntimeError("LeetCode GraphQL returned invalid JSON") from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise RuntimeError(f"LeetCode GraphQL is unavailable: {error}") from error
+
+    if not isinstance(payload, dict):
+        raise RuntimeError("LeetCode GraphQL returned an invalid response")
+
+    errors = payload.get("errors")
+    if errors:
+        detail = "; ".join(
+            str(item.get("message", item)) if isinstance(item, dict) else str(item)
+            for item in errors[:3]
+        )
+        raise RuntimeError(f"LeetCode GraphQL returned errors: {detail}")
+
+    data = payload.get("data")
+    daily = (
+        data.get("activeDailyCodingChallengeQuestion")
+        if isinstance(data, dict) else None
+    )
+    if not isinstance(daily, dict):
+        print("LeetCode GraphQL response did not contain today's daily challenge.")
+        return None
+
+    actual_date = daily.get("date")
+    if actual_date != target_date:
+        print(
+            f"LeetCode GraphQL date mismatch: received {actual_date}, "
+            f"expected {target_date}."
+        )
+        return None
+
+    question = daily.get("question")
+    if not isinstance(question, dict):
+        print("LeetCode GraphQL daily challenge did not contain a question.")
+        return None
+
+    question = dict(question)
+    question["questionLink"] = daily.get("link")
+    if not question.get("questionFrontendId"):
+        question["questionFrontendId"] = question.get("questionId")
+
+    problem = normalize_question(question)
+    if not problem.get("id") or not problem.get("content"):
+        print("LeetCode GraphQL did not return a complete problem statement.")
+        return None
+    if problem.get("is_paid_only"):
+        print("LeetCode GraphQL marked today's challenge as premium; skipping it.")
+        return None
+
+    return problem
+
+
 def normalize_question(data):
     if not isinstance(data, dict):
         raise RuntimeError("Question source returned an invalid record")
@@ -280,13 +384,24 @@ def archive_problem(target_date):
 
 
 def fetch_oj_daily_problem(target_date):
-    query = urlencode({"domain": "com", "date": target_date})
+    query = urlencode({"source": "leetcode.com", "date": target_date})
     payload = fetch_json(
         f"{OJ_API}/api/v1/daily?{query}",
         cache_seconds=60,
     )
     if not isinstance(payload, dict):
         raise RuntimeError("OJ API returned an invalid daily response")
+
+    # Accept the canonical response and common wrapped variants without
+    # treating an unknown response as a valid daily challenge.
+    for wrapper in ("data", "daily", "result"):
+        nested = payload.get(wrapper)
+        if (
+            isinstance(nested, dict)
+            and ("date" in nested or "problems" in nested)
+        ):
+            payload = nested
+            break
 
     if payload.get("status") == "fetching":
         retry_after = payload.get("retry_after")
@@ -305,9 +420,19 @@ def fetch_oj_daily_problem(target_date):
         return None
 
     records = payload.get("problems")
+    if isinstance(records, dict):
+        records = [records]
     if not isinstance(records, list):
-        print("OJ API daily response did not contain a problems list.")
-        return None
+        single_problem = payload.get("problem") or payload.get("question")
+        if isinstance(single_problem, dict):
+            records = [single_problem]
+        else:
+            keys = ", ".join(sorted(str(key) for key in payload.keys()))
+            print(
+                "OJ API daily response did not contain a problems list "
+                f"(response keys: {keys or 'none'})."
+            )
+            return None
 
     daily_source = payload.get("source")
     if daily_source not in {"leetcode.com", "leetcode"}:
@@ -401,10 +526,11 @@ def _source_error(label, error):
 
 
 def fetch_verified_daily_problem(target_date):
-    """Verify with OJ API + archive, then use Alfa as a one-request tie-breaker."""
+    """Verify with independent sources, preferring LeetCode's official endpoint."""
     oj_problem = None
     archived = None
     alfa_problem = None
+    official_problem = None
 
     try:
         oj_problem = fetch_oj_daily_problem(target_date)
@@ -433,11 +559,47 @@ def fetch_verified_daily_problem(target_date):
         )
         return target_date, oj_problem
 
+    # The official endpoint is the source of truth. Use it to recover when
+    # third-party sources are unavailable, and cross-check it whenever one
+    # of those sources did return a candidate.
+    try:
+        official_problem = fetch_leetcode_graphql_daily_problem(target_date)
+        if official_problem:
+            print(
+                f"LeetCode GraphQL returned #{official_problem['id']} "
+                f"{official_problem['title']} for {target_date}."
+            )
+    except Exception as error:
+        _source_error("Official LeetCode GraphQL", error)
+
+    if official_problem:
+        if not oj_problem and not archived:
+            print(
+                f"Verified {target_date}: #{official_problem['id']} "
+                f"{official_problem['title']} directly against LeetCode's "
+                "official daily challenge endpoint."
+            )
+            return target_date, official_problem
+
+        if oj_problem and _same_problem(official_problem, oj_problem):
+            print(
+                f"Verified {target_date}: #{official_problem['id']} "
+                f"{official_problem['title']} using LeetCode GraphQL and OJ API."
+            )
+            return target_date, official_problem
+
+        if archived and _same_problem(official_problem, archived):
+            print(
+                f"Verified {target_date}: #{official_problem['id']} "
+                f"{official_problem['title']} using LeetCode GraphQL and daily archive."
+            )
+            return target_date, official_problem
+
     if not oj_problem and not archived:
         print(
-            "Neither primary source returned a verifiable daily challenge. "
-            "Skipping the Alfa request because one source alone cannot "
-            "confirm the problem."
+            "Neither OJ API nor daily archive returned a verifiable challenge, "
+            "and the official LeetCode endpoint was unavailable or incomplete. "
+            "Skipping generation to avoid solving an outdated problem."
         )
         return None, None
 
@@ -450,6 +612,15 @@ def fetch_verified_daily_problem(target_date):
             )
     except Exception as error:
         _source_error("Alfa API", error)
+
+    if official_problem and alfa_problem and _same_problem(
+        official_problem, alfa_problem
+    ):
+        print(
+            f"Verified {target_date}: #{official_problem['id']} "
+            f"{official_problem['title']} using LeetCode GraphQL and Alfa API."
+        )
+        return target_date, official_problem
 
     if oj_problem and alfa_problem and _same_problem(oj_problem, alfa_problem):
         print(
@@ -465,10 +636,15 @@ def fetch_verified_daily_problem(target_date):
         )
         return target_date, alfa_problem
 
-    if oj_problem and archived and alfa_problem:
+    candidates = [
+        item for item in (oj_problem, archived, official_problem, alfa_problem)
+        if item
+    ]
+    if len(candidates) > 1:
         print(
-            "Daily challenge sources disagree. Refusing to generate a "
-            "solution from conflicting problem records."
+            "Daily challenge sources disagree or could not independently "
+            "confirm one another. Refusing to generate a solution from "
+            "conflicting problem records."
         )
     else:
         print(
