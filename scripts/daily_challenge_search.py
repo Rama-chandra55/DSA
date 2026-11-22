@@ -198,76 +198,76 @@ def fetch_json(url, cache_seconds=90):
 
 
 def fetch_leetcode_graphql_daily_problem(target_date):
-    """Fetch the daily challenge directly from LeetCode's official GraphQL API."""
-    query = """
+    """Fetch and hydrate the daily challenge through LeetCode's official GraphQL API."""
+
+    def graphql(query, operation_name, variables=None):
+        body = {
+            "query": query,
+            "operationName": operation_name,
+            "variables": variables or {},
+        }
+        request = Request(
+            "https://leetcode.com/graphql",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Origin": "https://leetcode.com",
+                "Referer": "https://leetcode.com/",
+                "User-Agent": "Mozilla/5.0 (compatible; DSA-Daily-Challenge/1.0)",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=25) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            detail = error.read().decode(errors="replace")[:300]
+            raise SourceHTTPError(
+                error.code,
+                detail,
+                parse_retry_after(error.headers, detail),
+            ) from error
+        except json.JSONDecodeError as error:
+            raise RuntimeError("LeetCode GraphQL returned invalid JSON") from error
+        except (URLError, TimeoutError, OSError) as error:
+            raise RuntimeError(f"LeetCode GraphQL is unavailable: {error}") from error
+
+        if not isinstance(payload, dict):
+            raise RuntimeError("LeetCode GraphQL returned an invalid response")
+        errors = payload.get("errors")
+        if errors:
+            detail = "; ".join(
+                str(item.get("message", item)) if isinstance(item, dict) else str(item)
+                for item in errors[:3]
+            )
+            raise RuntimeError(f"LeetCode GraphQL returned errors: {detail}")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("LeetCode GraphQL response did not contain data")
+        return data
+
+    daily_query = """
     query questionOfToday {
       activeDailyCodingChallengeQuestion {
         date
         link
         question {
-          questionId
           questionFrontendId
           title
           titleSlug
           difficulty
-          content
+          isPaidOnly
           topicTags {
             name
             slug
           }
-          similarQuestions
-          isPaidOnly
         }
       }
     }
     """
-    request = Request(
-        "https://leetcode.com/graphql",
-        data=json.dumps({
-            "query": query,
-            "operationName": "questionOfToday",
-        }).encode("utf-8"),
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Origin": "https://leetcode.com",
-            "Referer": "https://leetcode.com/",
-            "User-Agent": "Mozilla/5.0 (compatible; DSA-Daily-Challenge/1.0)",
-        },
-        method="POST",
-    )
-
-    try:
-        with urlopen(request, timeout=25) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        detail = error.read().decode(errors="replace")[:300]
-        raise SourceHTTPError(
-            error.code,
-            detail,
-            parse_retry_after(error.headers, detail),
-        ) from error
-    except json.JSONDecodeError as error:
-        raise RuntimeError("LeetCode GraphQL returned invalid JSON") from error
-    except (URLError, TimeoutError, OSError) as error:
-        raise RuntimeError(f"LeetCode GraphQL is unavailable: {error}") from error
-
-    if not isinstance(payload, dict):
-        raise RuntimeError("LeetCode GraphQL returned an invalid response")
-
-    errors = payload.get("errors")
-    if errors:
-        detail = "; ".join(
-            str(item.get("message", item)) if isinstance(item, dict) else str(item)
-            for item in errors[:3]
-        )
-        raise RuntimeError(f"LeetCode GraphQL returned errors: {detail}")
-
-    data = payload.get("data")
-    daily = (
-        data.get("activeDailyCodingChallengeQuestion")
-        if isinstance(data, dict) else None
-    )
+    daily_data = graphql(daily_query, "questionOfToday")
+    daily = daily_data.get("activeDailyCodingChallengeQuestion")
     if not isinstance(daily, dict):
         print("LeetCode GraphQL response did not contain today's daily challenge.")
         return None
@@ -280,15 +280,44 @@ def fetch_leetcode_graphql_daily_problem(target_date):
         )
         return None
 
-    question = daily.get("question")
+    daily_stub = daily.get("question")
+    if not isinstance(daily_stub, dict) or not daily_stub.get("titleSlug"):
+        print("LeetCode GraphQL daily challenge did not contain a question slug.")
+        return None
+
+    details_query = """
+    query questionData($titleSlug: String!) {
+      question(titleSlug: $titleSlug) {
+        questionId
+        questionFrontendId
+        title
+        titleSlug
+        difficulty
+        content
+        topicTags {
+          name
+          slug
+        }
+        similarQuestions
+        isPaidOnly
+      }
+    }
+    """
+    details_data = graphql(
+        details_query,
+        "questionData",
+        {"titleSlug": daily_stub["titleSlug"]},
+    )
+    question = details_data.get("question")
     if not isinstance(question, dict):
-        print("LeetCode GraphQL daily challenge did not contain a question.")
+        print("LeetCode GraphQL did not return the daily problem statement.")
         return None
 
     question = dict(question)
     question["questionLink"] = daily.get("link")
-    if not question.get("questionFrontendId"):
-        question["questionFrontendId"] = question.get("questionId")
+    for field in ("questionFrontendId", "title", "titleSlug", "difficulty", "isPaidOnly", "topicTags"):
+        if question.get(field) in (None, "", []):
+            question[field] = daily_stub.get(field)
 
     problem = normalize_question(question)
     if not problem.get("id") or not problem.get("content"):
