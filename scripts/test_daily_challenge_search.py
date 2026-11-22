@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import daily_challenge_search as sources
 
@@ -33,6 +33,76 @@ class RetryAfterParsingTests(unittest.TestCase):
                 "Too many requests from this IP, try again in 1 hour",
             ),
         )
+
+
+
+class LeetCodeGraphQLTests(unittest.TestCase):
+    def test_official_graphql_response_is_normalized_and_date_checked(self):
+        payload = {
+            "data": {
+                "activeDailyCodingChallengeQuestion": {
+                    "date": "2026-11-22",
+                    "link": "/problems/check-if-all-as-appears-before-all-bs/",
+                    "question": {
+                        "questionId": "2124",
+                        "questionFrontendId": "2124",
+                        "title": "Check if All A's Appears Before All B's",
+                        "titleSlug": "check-if-all-as-appears-before-all-bs",
+                        "difficulty": "Easy",
+                        "content": "<p>Check the order of the characters.</p>",
+                        "topicTags": [{"name": "String", "slug": "string"}],
+                        "similarQuestions": "[]",
+                        "isPaidOnly": False,
+                    },
+                }
+            }
+        }
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = __import__("json").dumps(payload).encode("utf-8")
+
+        with patch.object(sources, "urlopen", return_value=response) as mocked:
+            result = sources.fetch_leetcode_graphql_daily_problem("2026-11-22")
+
+        self.assertEqual("2124", result["id"])
+        self.assertEqual(
+            "Check if All A's Appears Before All B's",
+            result["title"],
+        )
+        self.assertEqual("check-if-all-as-appears-before-all-bs", result["slug"])
+        self.assertEqual(["String"], result["tags"])
+        request = mocked.call_args.args[0]
+        self.assertEqual("https://leetcode.com/graphql", request.full_url)
+        request_body = __import__("json").loads(request.data.decode("utf-8"))
+        self.assertEqual("questionOfToday", request_body["operationName"])
+        self.assertIn(
+            "activeDailyCodingChallengeQuestion",
+            request_body["query"],
+        )
+
+    def test_official_graphql_rejects_a_different_date(self):
+        payload = {
+            "data": {
+                "activeDailyCodingChallengeQuestion": {
+                    "date": "2026-11-21",
+                    "question": {
+                        "questionId": "3331",
+                        "questionFrontendId": "3331",
+                        "title": "Find Subtree Sizes After Changes",
+                        "titleSlug": "find-subtree-sizes-after-changes",
+                        "content": "<p>Statement</p>",
+                    },
+                }
+            }
+        }
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = __import__("json").dumps(payload).encode("utf-8")
+
+        with patch.object(sources, "urlopen", return_value=response):
+            result = sources.fetch_leetcode_graphql_daily_problem("2026-11-22")
+
+        self.assertIsNone(result)
 
 
 class DailySourceVerificationTests(unittest.TestCase):
@@ -112,6 +182,11 @@ class DailySourceVerificationTests(unittest.TestCase):
             ),
             patch.object(
                 sources,
+                "fetch_leetcode_graphql_daily_problem",
+                return_value=None,
+            ),
+            patch.object(
+                sources,
                 "fetch_alfa_daily_problem",
                 return_value=problem("3", "Longest Substring"),
             ),
@@ -127,6 +202,11 @@ class DailySourceVerificationTests(unittest.TestCase):
             patch.object(sources, "archive_problem", return_value=None),
             patch.object(
                 sources,
+                "fetch_leetcode_graphql_daily_problem",
+                return_value=None,
+            ),
+            patch.object(
+                sources,
                 "fetch_alfa_daily_problem",
                 side_effect=AssertionError("one source alone cannot verify the challenge"),
             ),
@@ -135,6 +215,27 @@ class DailySourceVerificationTests(unittest.TestCase):
 
         self.assertIsNone(date)
         self.assertIsNone(result)
+
+
+    def test_official_leetcode_verifies_when_both_secondary_sources_are_unavailable(self):
+        with (
+            patch.object(sources, "fetch_oj_daily_problem", return_value=None),
+            patch.object(sources, "archive_problem", return_value=None),
+            patch.object(
+                sources,
+                "fetch_leetcode_graphql_daily_problem",
+                return_value=problem("2124", "Check if All A's Appears Before All B's"),
+            ),
+            patch.object(
+                sources,
+                "fetch_alfa_daily_problem",
+                side_effect=AssertionError("official source already verified the challenge"),
+            ),
+        ):
+            date, result = sources.fetch_verified_daily_problem("2026-11-22")
+
+        self.assertEqual("2026-11-22", date)
+        self.assertEqual("2124", result["id"])
 
     def test_oj_fetching_response_is_not_polled(self):
         with patch.object(
