@@ -144,6 +144,11 @@ class DailySourceVerificationTests(unittest.TestCase):
                 "archive_problem",
                 return_value={"id": "1", "title": "Two Sum"},
             ),
+            patch.object(
+                sources,
+                "fetch_leetcode_graphql_daily_problem",
+                return_value=None,
+            ),
             patch.object(sources, "fetch_alfa_daily_problem", return_value=problem()),
             patch.object(sources.time, "sleep") as sleep,
         ):
