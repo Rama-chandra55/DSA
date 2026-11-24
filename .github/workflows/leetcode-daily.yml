@@ -1,6 +1,11 @@
 name: LeetCode Daily Solution
 
 on:
+  schedule:
+    # Backup attempts at 14:00 and 20:00 India time.
+    # The solver's daily push guard prevents duplicate commits.
+    - cron: "30 8 * * *"
+    - cron: "30 14 * * *"
   workflow_dispatch:
 
 permissions:
