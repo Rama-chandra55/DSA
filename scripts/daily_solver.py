@@ -461,6 +461,8 @@ def clean_code(code):
 
 
 def validate_code(code):
+    if not isinstance(code, str) or not code.strip():
+        raise RuntimeError("Generated code must be a non-empty Python string")
     code = clean_code(code)
     try:
         tree = ast.parse(code)
@@ -501,6 +503,41 @@ def validate_code(code):
     if any(len(line) > 100 for line in code.splitlines()):
         raise RuntimeError("Generated code contains an unnecessarily long line")
     return code
+
+
+
+def generate_valid_solution(problem, date, alternative=False, old_code=""):
+    prompt = make_prompt(problem, date, alternative, old_code)
+    result = gemini(prompt)
+    if not isinstance(result, dict):
+        raise RuntimeError("Gemini returned an invalid solution response")
+    if result.get("skip"):
+        return result, None
+
+    try:
+        return result, validate_code(result.get("code", ""))
+    except RuntimeError as error:
+        rejected_code = str(result.get("code", ""))[:5000]
+        print(
+            f"Generated code failed local validation: {error}. "
+            "Requesting one corrected solution."
+        )
+        retry_prompt = (
+            prompt
+            + "\nThe previous response failed local Python validation: "
+            + str(error)
+            + "\nRejected code:\n"
+            + rejected_code
+            + "\nRegenerate the complete solution from scratch. "
+            "Return the required strict JSON and ensure code contains "
+            "a top-level class Solution with the required method."
+        )
+        retry = gemini(retry_prompt)
+        if not isinstance(retry, dict):
+            raise RuntimeError("Gemini returned an invalid corrected response")
+        if retry.get("skip"):
+            return retry, None
+        return retry, validate_code(retry.get("code", ""))
 
 
 def review(problem, code):
@@ -602,7 +639,9 @@ def main():
         name = file_stem(target.get("title", "RelatedProblem"))
 
     old_code = existing.read_text(encoding="utf-8") if alternative else ""
-    result = gemini(make_prompt(target, date, alternative, old_code))
+    result, generated_code = generate_valid_solution(
+        target, date, alternative, old_code
+    )
     if result.get("skip") and alternative:
         target = related_problem(daily)
         if not target:
@@ -611,11 +650,11 @@ def main():
             return
         name = file_stem(target.get("title", "RelatedProblem"))
         alternative = False
-        result = gemini(make_prompt(target, date))
+        result, generated_code = generate_valid_solution(target, date)
     if result.get("skip"):
         raise RuntimeError("Gemini could not produce a useful solution")
 
-    code = review(target, validate_code(result.get("code", "")))
+    code = review(target, generated_code)
 
     reason = daily_push_already_happened(push_date)
     if reason:
