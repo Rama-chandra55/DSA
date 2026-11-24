@@ -253,21 +253,31 @@ def repair_json_control_characters(value):
     return "".join(repaired)
 
 
-def gemini(prompt, timeout=45, max_total_seconds=150, max_output_tokens=4096):
+def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096):
     if not KEY:
         raise RuntimeError("Add GEMINI_API_KEY to repository Actions secrets")
 
-    fallback = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
-    secondary_fallback = os.getenv(
-        "GEMINI_SECONDARY_FALLBACK_MODEL", "gemini-3.5-flash-lite"
+    fallback_models = (
+        os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash"),
+        os.getenv("GEMINI_SECONDARY_FALLBACK_MODEL", "gemini-3.5-flash"),
+        os.getenv("GEMINI_TERTIARY_FALLBACK_MODEL", "gemini-3.5-flash-lite"),
+        os.getenv("GEMINI_QUATERNARY_FALLBACK_MODEL", "gemini-3.1-flash-lite"),
     )
     models = list(dict.fromkeys(
         model.strip()
-        for model in (MODEL, fallback, secondary_fallback)
+        for model in (MODEL, *fallback_models)
         if model and model.strip()
     ))
     if not models:
         raise RuntimeError("No Gemini models are configured")
+
+    retry_rounds = max(1, int(os.getenv("GEMINI_RETRY_ROUNDS", "2")))
+    retry_backoff = max(1, int(os.getenv("GEMINI_RETRY_BACKOFF_SECONDS", "15")))
+    max_backoff = max(
+        retry_backoff,
+        int(os.getenv("GEMINI_MAX_RETRY_BACKOFF_SECONDS", "60")),
+    )
+    transient_statuses = {408, 429, 500, 502, 503, 504}
 
     timeout = max(1, int(timeout))
     max_total_seconds = max(1, int(max_total_seconds))
@@ -278,102 +288,135 @@ def gemini(prompt, timeout=45, max_total_seconds=150, max_output_tokens=4096):
     budget_seconds = max(1, int(deadline - time.monotonic()))
     last_error = None
 
-    for model_index, model in enumerate(models):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
+    for round_index in range(retry_rounds):
+        round_had_transient_error = False
 
-        request_timeout = min(timeout, max(1, int(remaining)))
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model}:generateContent?key={KEY}"
-        )
-        body = {
-            "systemInstruction": {"parts": [{"text": RULES}]},
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "maxOutputTokens": max_output_tokens,
-            },
-        }
-        request = Request(
-            url,
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        for model in models:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
 
-        print(
-            f"Calling Gemini model {model} "
-            f"(one attempt, timeout {request_timeout}s)."
-        )
-
-        try:
-            with urlopen(request, timeout=request_timeout) as response:
-                result = json.loads(response.read().decode("utf-8"))
-
-            candidates = result.get("candidates", [])
-            parts = (
-                candidates[0].get("content", {}).get("parts", [])
-                if candidates else []
+            request_timeout = min(timeout, max(1, int(remaining)))
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent?key={KEY}"
             )
-            response_text = "\n".join(
-                part.get("text", "") for part in parts
+            body = {
+                "systemInstruction": {"parts": [{"text": RULES}]},
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "maxOutputTokens": max_output_tokens,
+                },
+            }
+            request = Request(
+                url,
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
             )
-            if not response_text:
-                raise RuntimeError("Gemini returned an empty response")
+
+            print(
+                f"Calling Gemini model {model} "
+                f"(round {round_index + 1}/{retry_rounds}, "
+                f"timeout {request_timeout}s)."
+            )
 
             try:
-                return json.loads(response_text)
-            except json.JSONDecodeError as error:
-                repaired = repair_json_control_characters(response_text)
-                if repaired != response_text:
-                    try:
-                        parsed = json.loads(repaired)
-                        print(
-                            "Recovered Gemini's JSON response by escaping "
-                            "unescaped line breaks inside code."
-                        )
-                        return parsed
-                    except json.JSONDecodeError:
-                        pass
+                with urlopen(request, timeout=request_timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
 
-                raise RuntimeError(
-                    "Gemini did not return valid JSON: "
-                    f"{error.msg} at line {error.lineno}, "
-                    f"column {error.colno}"
-                ) from error
+                candidates = result.get("candidates", [])
+                parts = (
+                    candidates[0].get("content", {}).get("parts", [])
+                    if candidates else []
+                )
+                response_text = "\n".join(
+                    part.get("text", "") for part in parts
+                )
+                if not response_text:
+                    raise RuntimeError("Gemini returned an empty response")
 
-        except HTTPError as error:
-            detail = error.read().decode(errors="replace")[:400]
-            last_error = RuntimeError(
-                f"Gemini API returned HTTP {error.code}: {detail}"
-            )
-            if error.code in {404, 408, 410, 429, 500, 502, 503, 504}:
+                try:
+                    return json.loads(response_text)
+                except json.JSONDecodeError as error:
+                    repaired = repair_json_control_characters(response_text)
+                    if repaired != response_text:
+                        try:
+                            parsed = json.loads(repaired)
+                            print(
+                                "Recovered Gemini's JSON response by escaping "
+                                "unescaped line breaks inside code."
+                            )
+                            return parsed
+                        except json.JSONDecodeError:
+                            pass
+
+                    raise RuntimeError(
+                        "Gemini did not return valid JSON: "
+                        f"{error.msg} at line {error.lineno}, "
+                        f"column {error.colno}"
+                    ) from error
+
+            except HTTPError as error:
+                detail = error.read().decode(errors="replace")[:400]
+                last_error = RuntimeError(
+                    f"Gemini API returned HTTP {error.code}: {detail}"
+                )
+                if error.code in transient_statuses:
+                    round_had_transient_error = True
+                    print(
+                        f"Gemini model {model} returned HTTP {error.code}. "
+                        "Trying the next model before retrying this model set."
+                    )
+                    continue
+                if error.code in {404, 410}:
+                    print(
+                        f"Gemini model {model} is unavailable for this request "
+                        f"(HTTP {error.code}). Skipping this model."
+                    )
+                    continue
+                raise last_error from error
+
+            except (TimeoutError, URLError, OSError) as error:
+                last_error = RuntimeError(
+                    f"Gemini request failed on {model}: {error}"
+                )
+                round_had_transient_error = True
                 print(
-                    f"Gemini model {model} returned HTTP {error.code}. "
-                    "Moving directly to the next configured model."
+                    f"Gemini model {model} timed out or had a connection error. "
+                    "Trying the next model before retrying this model set."
                 )
                 continue
-            raise last_error from error
 
-        except (TimeoutError, URLError, OSError) as error:
-            last_error = RuntimeError(
-                f"Gemini request failed on {model}: {error}"
-            )
-            print(
-                f"Gemini model {model} timed out or had a connection error. "
-                "Moving directly to the next configured model."
-            )
-            continue
+            except (RuntimeError, json.JSONDecodeError) as error:
+                last_error = error
+                print(
+                    f"Gemini response from {model} could not be used: {error}. "
+                    "Trying the next configured model."
+                )
+                continue
 
-        except (RuntimeError, json.JSONDecodeError) as error:
-            last_error = error
-            print(
-                f"Gemini response from {model} could not be used: {error}. "
-                "Trying the next configured model."
-            )
-            continue
+        if (
+            round_index >= retry_rounds - 1
+            or not round_had_transient_error
+        ):
+            break
+
+        remaining = deadline - time.monotonic()
+        delay = min(
+            retry_backoff * (2 ** round_index),
+            max_backoff,
+            max(0, int(remaining)),
+        )
+        if delay <= 0:
+            break
+
+        print(
+            f"All configured Gemini models were attempted in round "
+            f"{round_index + 1}. Retrying the model list in {delay} seconds."
+        )
+        time.sleep(delay)
 
     if time.monotonic() >= deadline:
         raise RuntimeError(
@@ -382,7 +425,8 @@ def gemini(prompt, timeout=45, max_total_seconds=150, max_output_tokens=4096):
         ) from last_error
 
     raise RuntimeError(
-        f"Gemini request failed for all configured models: {last_error}"
+        f"Gemini request failed after {retry_rounds} round(s) "
+        f"across all configured models: {last_error}"
     ) from last_error
 
 
@@ -479,7 +523,7 @@ Candidate code:
     result = gemini(
         prompt,
         timeout=30,
-        max_total_seconds=90,
+        max_total_seconds=330,
         max_output_tokens=512,
     )
     if not isinstance(result, dict):
@@ -518,7 +562,7 @@ def main():
         set_output("changed", "false")
         return
 
-    GEMINI_RUN_DEADLINE = time.monotonic() + 10 * 60
+    GEMINI_RUN_DEADLINE = time.monotonic() + 15 * 60
     challenge_date = datetime.now(timezone.utc).date().isoformat()
     date, daily = fetch_verified_daily_problem(challenge_date)
     if not daily:
