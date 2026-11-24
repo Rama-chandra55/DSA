@@ -186,5 +186,39 @@ class GeminiFallbackTests(unittest.TestCase):
         mocked_sleep.assert_called_once_with(1)
 
 
+    def test_invalid_generated_code_gets_one_regeneration(self):
+        problem = {
+            "title": "Example",
+            "id": "1",
+            "content": "Return true for this example problem.",
+        }
+        invalid = {"skip": False, "code": "def solve():\n    return True"}
+        valid = {
+            "skip": False,
+            "code": "class Solution:\n    def solve(self):\n        return True",
+        }
+
+        with patch.object(
+            daily_solver,
+            "gemini",
+            side_effect=[invalid, valid],
+        ) as mocked_gemini:
+            result, code = daily_solver.generate_valid_solution(
+                problem,
+                "2026-11-24",
+            )
+
+        self.assertIs(valid, result)
+        self.assertEqual(
+            "class Solution:\n    def solve(self):\n        return True",
+            code,
+        )
+        self.assertEqual(2, mocked_gemini.call_count)
+        self.assertIn(
+            "previous response failed local Python validation",
+            mocked_gemini.call_args_list[1].args[0],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
