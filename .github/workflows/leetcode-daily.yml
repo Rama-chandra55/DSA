@@ -49,6 +49,11 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: gemini-3.8-flash
           GEMINI_FALLBACK_MODEL: gemini-3.7-flash
+          GEMINI_SECONDARY_FALLBACK_MODEL: gemini-3.5-flash
+          GEMINI_TERTIARY_FALLBACK_MODEL: gemini-3.5-flash-lite
+          GEMINI_QUATERNARY_FALLBACK_MODEL: gemini-3.1-flash-lite
+          GEMINI_RETRY_ROUNDS: "2"
+          GEMINI_RETRY_BACKOFF_SECONDS: "15"
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           SOURCE_COOLDOWN_FILE: ${{ runner.temp }}/leetcode-source-cooldowns.json
