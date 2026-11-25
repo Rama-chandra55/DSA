@@ -1,6 +1,9 @@
 name: LeetCode Daily Solution
 
 on:
+  push:
+    paths:
+      - "scripts/daily_solver.py"
   schedule:
     # Backup attempts at 14:00 and 20:00 India time.
     # The solver's daily push guard prevents duplicate commits.
@@ -57,6 +60,7 @@ jobs:
           GEMINI_SECONDARY_FALLBACK_MODEL: gemini-3.5-flash
           GEMINI_TERTIARY_FALLBACK_MODEL: gemini-3.5-flash-lite
           GEMINI_QUATERNARY_FALLBACK_MODEL: gemini-3.1-flash-lite
+          AI_REVIEW_REPAIR_ATTEMPTS: "2"
           GEMINI_RETRY_ROUNDS: "2"
           GEMINI_RETRY_BACKOFF_SECONDS: "15"
           GITHUB_TOKEN: ${{ github.token }}
