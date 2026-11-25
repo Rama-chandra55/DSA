@@ -278,5 +278,63 @@ class GeminiFallbackTests(unittest.TestCase):
         self.assertIn(original_code, repair_prompt)
 
 
+    def test_review_repair_retries_when_model_returns_skip(self):
+        problem = {
+            "title": "Smallest Unique Subarray",
+            "id": "3934",
+            "content": "Find the minimum length of a unique subarray.",
+        }
+        original_code = (
+            "class Solution:\n"
+            "    def solve(self):\n"
+            "        return None\n"
+        )
+        repaired_code = (
+            "class Solution:\n"
+            "    def solve(self):\n"
+            "        return True\n"
+        )
+        original = {"skip": False, "code": original_code}
+        skipped = {"skip": True, "code": ""}
+        repaired = {"skip": False, "code": repaired_code}
+
+        with (
+            patch.object(
+                daily_solver,
+                "generate_valid_solution",
+                return_value=(original, original_code),
+            ),
+            patch.object(
+                daily_solver,
+                "review",
+                side_effect=[
+                    RuntimeError(
+                        "The AI review did not approve the solution: "
+                        "rolling hash collision risk"
+                    ),
+                    repaired_code,
+                ],
+            ) as mocked_review,
+            patch.object(
+                daily_solver,
+                "gemini",
+                side_effect=[skipped, repaired],
+            ) as mocked_gemini,
+            patch.dict(os.environ, {"AI_REVIEW_REPAIR_ATTEMPTS": "2"}),
+        ):
+            result, reviewed_code = daily_solver.generate_reviewed_solution(
+                problem,
+                "2026-11-25",
+            )
+
+        self.assertIs(repaired, result)
+        self.assertEqual(repaired_code, reviewed_code)
+        self.assertEqual(2, mocked_review.call_count)
+        self.assertEqual(2, mocked_gemini.call_count)
+        retry_prompt = mocked_gemini.call_args_list[1].args[0]
+        self.assertIn("skip=true is not acceptable", retry_prompt)
+        self.assertIn("suffix array with Kasai LCP", retry_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

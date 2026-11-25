@@ -583,6 +583,7 @@ Candidate code:
 
 
 
+
 def generate_reviewed_solution(problem, date, alternative=False, old_code=""):
     result, code = generate_valid_solution(
         problem, date, alternative, old_code
@@ -629,13 +630,46 @@ def generate_reviewed_solution(problem, date, alternative=False, old_code=""):
                 f"Reviewer feedback:\n{error}\n\n"
                 f"Rejected candidate code:\n{code}\n"
             )
+            if normalise(problem.get("title", "")) == normalise(
+                "Smallest Unique Subarray"
+            ):
+                repair_prompt += (
+                    "\nFor this specific problem, use a deterministic suffix "
+                    "array with Kasai LCP instead of rolling hashes. The "
+                    "shortest unique prefix for a suffix is one plus the "
+                    "maximum LCP with its immediate suffix-array neighbors; "
+                    "take the minimum valid length over all suffixes. Use "
+                    "O(n log n) time and O(n) space.\n"
+                )
+
             repaired = gemini(repair_prompt)
             if not isinstance(repaired, dict):
                 raise RuntimeError(
                     "Gemini returned an invalid review-repair response"
                 )
             if repaired.get("skip"):
-                return repaired, None
+                if alternative:
+                    return repaired, None
+                print(
+                    "Gemini returned skip=true for a verified daily challenge. "
+                    "Requesting a complete solution instead."
+                )
+                repair_prompt += (
+                    "\nThis is a verified daily challenge, so skip=true is "
+                    "not acceptable. Return a complete corrected solution "
+                    "with skip=false. Do not use a rolling hash for this "
+                    "problem; use the deterministic suffix-array and LCP "
+                    "approach described above.\n"
+                )
+                repaired = gemini(repair_prompt)
+                if not isinstance(repaired, dict):
+                    raise RuntimeError(
+                        "Gemini returned an invalid follow-up repair response"
+                    )
+                if repaired.get("skip"):
+                    raise RuntimeError(
+                        "Gemini declined to repair the verified daily challenge"
+                    )
 
             code = validate_code(repaired.get("code", ""))
             result = repaired
