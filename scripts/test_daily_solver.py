@@ -220,5 +220,63 @@ class GeminiFallbackTests(unittest.TestCase):
         )
 
 
+    def test_review_rejection_triggers_targeted_repair_and_re_review(self):
+        problem = {
+            "title": "Example",
+            "id": "1",
+            "content": "Return true for this example problem.",
+        }
+        original_code = (
+            "class Solution:\n"
+            "    def solve(self):\n"
+            "        return None\n"
+        )
+        repaired_code = (
+            "class Solution:\n"
+            "    def solve(self):\n"
+            "        return True\n"
+        )
+        original = {"skip": False, "code": original_code}
+        repaired = {"skip": False, "code": repaired_code}
+
+        with (
+            patch.object(
+                daily_solver,
+                "generate_valid_solution",
+                return_value=(original, original_code),
+            ),
+            patch.object(
+                daily_solver,
+                "review",
+                side_effect=[
+                    RuntimeError(
+                        "The AI review did not approve the solution: "
+                        "missing collections import; rolling hash collision risk"
+                    ),
+                    repaired_code,
+                ],
+            ) as mocked_review,
+            patch.object(
+                daily_solver,
+                "gemini",
+                return_value=repaired,
+            ) as mocked_gemini,
+            patch.dict(os.environ, {"AI_REVIEW_REPAIR_ATTEMPTS": "2"}),
+        ):
+            result, reviewed_code = daily_solver.generate_reviewed_solution(
+                problem,
+                "2026-11-25",
+            )
+
+        self.assertIs(repaired, result)
+        self.assertEqual(repaired_code, reviewed_code)
+        self.assertEqual(2, mocked_review.call_count)
+        mocked_gemini.assert_called_once()
+        repair_prompt = mocked_gemini.call_args.args[0]
+        self.assertIn("missing collections import", repair_prompt)
+        self.assertIn("rolling hash collision risk", repair_prompt)
+        self.assertIn(original_code, repair_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
