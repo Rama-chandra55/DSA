@@ -1,14 +1,12 @@
 name: LeetCode Daily Solution
 
 on:
+  # cron-job.org dispatches the daily run at 08:15 Asia/Kolkata.
+  # Keep GitHub schedule triggers disabled: delayed scheduled runs can cross
+  # IST midnight and consume the next day's one-push limit.
   push:
     paths:
       - "scripts/daily_solver.py"
-  schedule:
-    # Backup attempts at 14:00 and 20:00 India time.
-    # The solver's daily push guard prevents duplicate commits.
-    - cron: "30 8 * * *"
-    - cron: "30 14 * * *"
   workflow_dispatch:
 
 permissions:
