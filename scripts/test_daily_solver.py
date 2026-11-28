@@ -336,5 +336,68 @@ class GeminiFallbackTests(unittest.TestCase):
         self.assertIn("suffix array with Kasai LCP", retry_prompt)
 
 
+    def test_verified_daily_challenge_skip_tries_next_model(self):
+        skipped = self.make_response({"skip": True, "code": ""})
+        valid = self.make_response(
+            {"skip": False, "code": "class Solution:\\n    pass"}
+        )
+
+        with (
+            patch.object(daily_solver, "KEY", "test-key"),
+            patch.object(daily_solver, "MODEL", "primary-model"),
+            patch.object(daily_solver, "GEMINI_RUN_DEADLINE", None),
+            patch.dict(
+                os.environ,
+                {
+                    "GEMINI_FALLBACK_MODEL": "fallback-model",
+                    "GEMINI_SECONDARY_FALLBACK_MODEL": "",
+                    "GEMINI_TERTIARY_FALLBACK_MODEL": "",
+                    "GEMINI_QUATERNARY_FALLBACK_MODEL": "",
+                    "GEMINI_RETRY_ROUNDS": "1",
+                },
+            ),
+            patch.object(
+                daily_solver,
+                "urlopen",
+                side_effect=[skipped, valid],
+            ) as mocked_urlopen,
+        ):
+            result = daily_solver.gemini(
+                "verified daily challenge",
+                timeout=2,
+                max_total_seconds=10,
+                allow_skip=False,
+            )
+
+        self.assertFalse(result["skip"])
+        self.assertEqual(2, mocked_urlopen.call_count)
+        fallback_request = mocked_urlopen.call_args_list[1].args[0]
+        self.assertIn("fallback-model:generateContent", fallback_request.full_url)
+
+
+    def test_alternative_solution_is_allowed_to_skip(self):
+        problem = {
+            "title": "Example",
+            "id": "1",
+            "content": "Return true for this example problem.",
+        }
+        skipped = {"skip": True, "code": ""}
+
+        with patch.object(
+            daily_solver,
+            "gemini",
+            return_value=skipped,
+        ) as mocked_gemini:
+            result, code = daily_solver.generate_valid_solution(
+                problem,
+                "2026-11-28",
+                alternative=True,
+            )
+
+        self.assertIs(skipped, result)
+        self.assertIsNone(code)
+        self.assertTrue(mocked_gemini.call_args.kwargs["allow_skip"])
+
+
 if __name__ == "__main__":
     unittest.main()
