@@ -53,6 +53,8 @@ jobs:
         id: solver
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: openai/gpt-oss-120b
           GEMINI_MODEL: gemini-3.8-flash
           GEMINI_FALLBACK_MODEL: gemini-3.7-flash
           GEMINI_SECONDARY_FALLBACK_MODEL: gemini-3.5-flash
