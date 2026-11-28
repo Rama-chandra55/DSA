@@ -256,6 +256,75 @@ def repair_json_control_characters(value):
     return "".join(repaired)
 
 
+def groq_fallback(prompt, timeout, max_output_tokens, allow_skip):
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        return None
+
+    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+    if not model:
+        raise RuntimeError("GROQ_MODEL is empty")
+
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": RULES},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+        "max_completion_tokens": max_output_tokens,
+        "reasoning_effort": "medium",
+        "temperature": 0.2,
+    }
+    request = Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": "DSA-Daily-Solver/1.0",
+        },
+        method="POST",
+    )
+
+    print(f"Calling Groq fallback model {model} (timeout {timeout}s).")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        detail = error.read().decode(errors="replace")[:400]
+        raise RuntimeError(
+            f"Groq fallback returned HTTP {error.code}: {detail}"
+        ) from error
+    except (TimeoutError, URLError, OSError) as error:
+        raise RuntimeError(f"Groq fallback request failed: {error}") from error
+
+    choices = result.get("choices", [])
+    response_text = (
+        choices[0].get("message", {}).get("content", "")
+        if choices else ""
+    )
+    if not response_text:
+        raise RuntimeError("Groq fallback returned an empty response")
+
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"Groq fallback did not return valid JSON: {error.msg}"
+        ) from error
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Groq fallback returned an invalid JSON object")
+    if parsed.get("skip") is True and not allow_skip:
+        raise RuntimeError(
+            "Groq fallback returned skip=true for a verified daily challenge"
+        )
+
+    print(f"Groq fallback model {model} returned a usable response.")
+    return parsed
+
+
 def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096, allow_skip=True):
     if not KEY:
         raise RuntimeError("Add GEMINI_API_KEY to repository Actions secrets")
@@ -290,6 +359,7 @@ def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096, al
         deadline = min(deadline, GEMINI_RUN_DEADLINE)
     budget_seconds = max(1, int(deadline - time.monotonic()))
     last_error = None
+    groq_attempted = False
 
     for round_index in range(retry_rounds):
         round_had_transient_error = False
@@ -415,6 +485,23 @@ def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096, al
                     "Trying the next configured model."
                 )
                 continue
+
+        if not groq_attempted and os.getenv("GROQ_API_KEY"):
+            groq_attempted = True
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    fallback_result = groq_fallback(
+                        prompt,
+                        timeout=min(timeout, max(1, int(remaining))),
+                        max_output_tokens=max_output_tokens,
+                        allow_skip=allow_skip,
+                    )
+                    if fallback_result is not None:
+                        return fallback_result
+                except RuntimeError as error:
+                    last_error = error
+                    print(f"Groq fallback could not be used: {error}")
 
         if (
             round_index >= retry_rounds - 1
