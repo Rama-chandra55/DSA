@@ -21,6 +21,20 @@ class GeminiFallbackTests(unittest.TestCase):
         response.read.return_value = json.dumps(api_payload).encode("utf-8")
         return response
 
+    def make_groq_response(self, payload):
+        api_payload = {
+            "choices": [
+                {
+                    "message": {"content": json.dumps(payload)},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps(api_payload).encode("utf-8")
+        return response
+
     def test_timeout_moves_to_next_model_without_waiting(self):
         response = self.make_response({"skip": False, "code": "class Solution:\n    pass"})
         with (
@@ -50,6 +64,56 @@ class GeminiFallbackTests(unittest.TestCase):
         self.assertEqual(2, mocked_urlopen.call_count)
         fallback_request = mocked_urlopen.call_args_list[1].args[0]
         self.assertIn("fallback-model:generateContent", fallback_request.full_url)
+
+    def test_groq_fallback_is_used_after_gemini_outage(self):
+        response = self.make_groq_response(
+            {"skip": False, "code": "class Solution:\\n    pass"}
+        )
+
+        unavailable = HTTPError(
+            "https://generativelanguage.googleapis.com/test",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":{"code":503,"status":"UNAVAILABLE"}}'),
+        )
+
+        with (
+            patch.object(daily_solver, "KEY", "test-key"),
+            patch.object(daily_solver, "MODEL", "primary-model"),
+            patch.object(daily_solver, "GEMINI_RUN_DEADLINE", None),
+            patch.dict(
+                os.environ,
+                {
+                    "GROQ_API_KEY": "test-groq-key",
+                    "GROQ_MODEL": "openai/gpt-oss-120b",
+                    "GEMINI_FALLBACK_MODEL": "",
+                    "GEMINI_SECONDARY_FALLBACK_MODEL": "",
+                    "GEMINI_TERTIARY_FALLBACK_MODEL": "",
+                    "GEMINI_QUATERNARY_FALLBACK_MODEL": "",
+                    "GEMINI_RETRY_ROUNDS": "2",
+                },
+            ),
+            patch.object(
+                daily_solver,
+                "urlopen",
+                side_effect=[unavailable, response],
+            ) as mocked_urlopen,
+        ):
+            result = daily_solver.gemini(
+                "test prompt",
+                timeout=2,
+                max_total_seconds=10,
+            )
+
+        self.assertEqual("class Solution:\\n    pass", result["code"])
+        self.assertEqual(2, mocked_urlopen.call_count)
+        fallback_request = mocked_urlopen.call_args_list[1].args[0]
+        self.assertIn("api.groq.com/openai/v1/chat/completions", fallback_request.full_url)
+        self.assertEqual(
+            "Bearer test-groq-key",
+            fallback_request.get_header("Authorization"),
+        )
 
     def test_review_uses_small_decision_only_response(self):
         code = "class Solution:\n    def solve(self):\n        return True\n"
