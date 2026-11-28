@@ -256,7 +256,7 @@ def repair_json_control_characters(value):
     return "".join(repaired)
 
 
-def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096):
+def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096, allow_skip=True):
     if not KEY:
         raise RuntimeError("Add GEMINI_API_KEY to repository Actions secrets")
 
@@ -341,7 +341,22 @@ def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096):
                     raise RuntimeError("Gemini returned an empty response")
 
                 try:
-                    return json.loads(response_text)
+                    parsed = json.loads(response_text)
+                    if (
+                        isinstance(parsed, dict)
+                        and parsed.get("skip") is True
+                        and not allow_skip
+                    ):
+                        last_error = RuntimeError(
+                            "Gemini returned skip=true for a verified daily challenge"
+                        )
+                        round_had_transient_error = True
+                        print(
+                            "Gemini declined a verified daily challenge with "
+                            "skip=true. Trying the next configured model."
+                        )
+                        continue
+                    return parsed
                 except json.JSONDecodeError as error:
                     repaired = repair_json_control_characters(response_text)
                     if repaired != response_text:
@@ -394,6 +409,7 @@ def gemini(prompt, timeout=45, max_total_seconds=480, max_output_tokens=4096):
 
             except (RuntimeError, json.JSONDecodeError) as error:
                 last_error = error
+                round_had_transient_error = True
                 print(
                     f"Gemini response from {model} could not be used: {error}. "
                     "Trying the next configured model."
@@ -511,7 +527,7 @@ def validate_code(code):
 
 def generate_valid_solution(problem, date, alternative=False, old_code=""):
     prompt = make_prompt(problem, date, alternative, old_code)
-    result = gemini(prompt)
+    result = gemini(prompt, allow_skip=alternative)
     if not isinstance(result, dict):
         raise RuntimeError("Gemini returned an invalid solution response")
     if result.get("skip"):
@@ -535,7 +551,7 @@ def generate_valid_solution(problem, date, alternative=False, old_code=""):
             "Return the required strict JSON and ensure code contains "
             "a top-level class Solution with the required method."
         )
-        retry = gemini(retry_prompt)
+        retry = gemini(retry_prompt, allow_skip=alternative)
         if not isinstance(retry, dict):
             raise RuntimeError("Gemini returned an invalid corrected response")
         if retry.get("skip"):
@@ -642,7 +658,7 @@ def generate_reviewed_solution(problem, date, alternative=False, old_code=""):
                     "O(n log n) time and O(n) space.\n"
                 )
 
-            repaired = gemini(repair_prompt)
+            repaired = gemini(repair_prompt, allow_skip=alternative)
             if not isinstance(repaired, dict):
                 raise RuntimeError(
                     "Gemini returned an invalid review-repair response"
@@ -661,7 +677,7 @@ def generate_reviewed_solution(problem, date, alternative=False, old_code=""):
                     "problem; use the deterministic suffix-array and LCP "
                     "approach described above.\n"
                 )
-                repaired = gemini(repair_prompt)
+                repaired = gemini(repair_prompt, allow_skip=alternative)
                 if not isinstance(repaired, dict):
                     raise RuntimeError(
                         "Gemini returned an invalid follow-up repair response"
